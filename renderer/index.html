@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:;">
+  <title>Hardware Dashboard</title>
+  <link rel="stylesheet" href="../node_modules/@fontsource-variable/bricolage-grotesque/index.css">
+  <link rel="stylesheet" href="../node_modules/@fontsource/atkinson-hyperlegible/400.css">
+  <link rel="stylesheet" href="../node_modules/@fontsource/atkinson-hyperlegible/700.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <img src="logo.svg" alt="" width="34" height="34">
+      <span>Hardware Dashboard</span>
+    </div>
+    <nav class="nav" aria-label="Sections">
+      <button data-view="overview" class="active"><svg viewBox="0 0 24 24"><path d="M4 13h4v7H4zM10 4h4v16h-4zM16 9h4v11h-4z"/></svg>Overview</button>
+      <button data-view="health"><svg viewBox="0 0 24 24"><path d="M12 21s-7.5-4.6-9.4-9.4C1.2 8 3.4 4.5 7 4.5c2 0 3.3 1 5 2.8 1.7-1.8 3-2.8 5-2.8 3.6 0 5.8 3.5 4.4 7.1C19.5 16.4 12 21 12 21zm-3.3-9.8L7.4 13H4.9v1.6h3.4l.9-1.2 1.6 3.6 2.4-5 1 1.6h4.9V13h-4l-1.9-3-2.3 4.8z"/></svg>Health check<span class="nav-dot" id="nav-health-dot" hidden></span></button>
+      <div class="nav-group">Your hardware</div>
+      <button data-view="storage"><svg viewBox="0 0 24 24"><path d="M3 3h11v8H3zM16 3h5v8h-5zM3 13h6v8H3zM11 13h10v8H11z"/></svg>Disk space</button>
+      <button data-view="cleanup"><svg viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4zM6 9h12l-1 12H7z"/></svg>Clean up</button>
+      <button data-view="drivers"><svg viewBox="0 0 24 24"><path d="M7 2h10v4h3v12h-3v4H7v-4H4V6h3zm2 2v16h6V4z"/></svg>Drivers</button>
+      <button data-view="network"><svg viewBox="0 0 24 24"><path d="M12 18a2 2 0 110 4 2 2 0 010-4zM5 12.5a10 10 0 0114 0l-1.6 1.6a7.7 7.7 0 00-10.8 0zM1.5 9a15 15 0 0121 0l-1.6 1.6a12.7 12.7 0 00-17.8 0z"/></svg>Internet</button>
+      <button data-view="bluetooth"><svg viewBox="0 0 24 24"><path d="M11 2h1l6 5.5-4.6 4.5 4.6 4.5L12 22h-1v-7.6l-4.3 4.2-1.4-1.4L10.6 12 5.3 6.8l1.4-1.4L11 9.6zm2 2.6v5l2.6-2.5zm0 9.8v5l2.6-2.5z"/></svg>Bluetooth</button>
+    </nav>
+    <div class="side-live" id="side-live" aria-label="Live usage">
+      <div class="sl"><span>Processor</span><b data-sl="cpu">–</b><div class="sl-bar"><i data-slb="cpu"></i></div></div>
+      <div class="sl"><span>Memory</span><b data-sl="mem">–</b><div class="sl-bar"><i data-slb="mem"></i></div></div>
+      <div class="sl"><span>Graphics</span><b data-sl="gpu">–</b><div class="sl-bar"><i data-slb="gpu"></i></div></div>
+      <div class="machine" id="machine"></div>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <div class="titlebar">
+      <button class="health-chip idle" id="health-chip" data-goto="health"><span class="hc-dot"></span><span id="health-chip-text">Run a health check</span></button>
+    </div>
+    <main class="main">
+      <!-- OVERVIEW -->
+      <section class="view active" id="view-overview">
+        <header class="head">
+          <div>
+            <h1 id="ov-title">Your PC</h1>
+            <p class="sub" id="ov-sub">Reading your hardware…</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn ghost" data-tool="taskmgr">Task Manager</button>
+            <button class="btn accent" data-health="all">Check health</button>
+          </div>
+        </header>
+
+        <div class="panel readouts">
+          <div class="readout" id="ro-cpu">
+            <div class="ro-head"><span class="ro-label">Processor</span><button class="mini-link" data-health="cpu">Health check</button></div>
+            <div class="ro-value"><span class="big" data-k="v">–</span><span class="unit">%</span></div>
+            <div class="ro-meta" data-k="meta">&nbsp;</div>
+            <canvas class="spark" data-k="spark"></canvas>
+            <div class="cores" data-k="cores" title="Load on each processor core"></div>
+          </div>
+          <div class="readout" id="ro-mem">
+            <div class="ro-head"><span class="ro-label">Memory (RAM)</span><button class="mini-link" data-health="memory">Health check</button></div>
+            <div class="ro-value"><span class="big" data-k="v">–</span><span class="unit">GB used</span></div>
+            <div class="ro-meta" data-k="meta">&nbsp;</div>
+            <canvas class="spark" data-k="spark"></canvas>
+            <div class="meter" data-k="meter"><i></i></div>
+          </div>
+          <div class="readout" id="ro-gpu">
+            <div class="ro-head"><span class="ro-label">Graphics</span><button class="mini-link" data-health="gpu">Health check</button></div>
+            <div class="ro-value"><span class="big" data-k="v">–</span><span class="unit">%</span></div>
+            <div class="ro-meta" data-k="meta">&nbsp;</div>
+            <canvas class="spark" data-k="spark"></canvas>
+            <div class="vram">
+              <div class="row-between"><span>Video memory (VRAM)</span><span data-k="vram">–</span></div>
+              <div class="meter" data-k="vmeter"><i></i></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid4">
+          <section class="panel block">
+            <div class="block-head"><h2>Temperatures</h2></div>
+            <ul class="temps" id="temps"></ul>
+            <div class="note" id="temp-note" hidden></div>
+          </section>
+          <section class="panel block">
+            <div class="block-head"><h2>Storage</h2><button class="mini-link" data-goto="storage">Explore</button></div>
+            <div id="ov-drives"></div>
+            <button class="mini-link" data-health="storage">Check drive health</button>
+          </section>
+          <section class="panel block">
+            <div class="block-head"><h2>Internet</h2><button class="mini-link" data-goto="network">Test speed</button></div>
+            <div class="net-now" id="ov-net"></div>
+            <canvas class="spark tall" id="ov-net-spark"></canvas>
+            <div class="legend-inline"><span class="sw dl"></span>Download <span class="sw ul"></span>Upload</div>
+          </section>
+          <section class="panel block">
+            <div class="block-head"><h2>Bluetooth</h2><button class="mini-link" data-goto="bluetooth">All devices</button></div>
+            <div id="ov-bt"><p class="muted small">Looking for devices…</p></div>
+          </section>
+        </div>
+
+        <section class="panel block specs-panel">
+          <div class="block-head"><h2>Inside this PC</h2></div>
+          <dl class="specs cols" id="specs"></dl>
+        </section>
+      </section>
+
+      <!-- HEALTH -->
+      <section class="view" id="view-health">
+        <header class="head">
+          <div>
+            <h1>Health check</h1>
+            <p class="sub" id="hc-sub">Checks each part of your PC and explains, in plain words, anything that needs your attention.</p>
+          </div>
+          <div class="head-actions"><button class="btn accent" id="hc-all">Check everything</button></div>
+        </header>
+        <div class="hc-summary" id="hc-summary" hidden></div>
+        <div class="hc-list" id="hc-list"></div>
+      </section>
+
+      <!-- DISK SPACE -->
+      <section class="view" id="view-storage">
+        <header class="head">
+          <div>
+            <h1>Disk space</h1>
+            <p class="sub">Scan a drive to see which folders and files take up the most room. Nothing is deleted unless you choose to.</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn ghost" data-health="storage">Check drive health</button>
+            <button class="btn ghost" id="scan-folder">Scan a folder…</button>
+          </div>
+        </header>
+        <div class="drive-row" id="drive-row"></div>
+
+        <div class="panel scan-progress" id="scan-progress" hidden>
+          <div class="row-between">
+            <strong id="sp-title">Scanning…</strong>
+            <button class="btn ghost small" id="scan-cancel">Stop scan</button>
+          </div>
+          <div class="sp-stats" id="sp-stats"></div>
+          <div class="sp-path" id="sp-path"></div>
+          <div class="indeterminate"><i></i></div>
+        </div>
+
+        <div class="explorer" id="explorer" hidden>
+          <div class="ex-bar">
+            <button class="btn ghost small" id="ex-up" title="Go up one folder"><svg viewBox="0 0 24 24" class="ic"><path d="M12 5l7 7-1.4 1.4L13 8.8V20h-2V8.8l-4.6 4.6L5 12z"/></svg>Up</button>
+            <nav class="crumbs" id="crumbs" aria-label="Folder path"></nav>
+            <div class="tabs" role="tablist">
+              <button role="tab" data-tab="map" class="active">Map</button>
+              <button role="tab" data-tab="largest">Largest files</button>
+              <button role="tab" data-tab="types">File types</button>
+            </div>
+          </div>
+          <p class="ex-summary" id="ex-summary"></p>
+          <div class="tab-panel active" data-panel="map">
+            <div class="map-wrap">
+              <div class="treemap" id="treemap"></div>
+              <div class="panel ex-list" id="ex-list"></div>
+            </div>
+            <div class="legend" id="legend"></div>
+          </div>
+          <div class="tab-panel" data-panel="largest"><div class="file-table" id="largest"></div></div>
+          <div class="tab-panel" data-panel="types"><div class="file-table" id="types"></div></div>
+        </div>
+
+        <div class="empty" id="storage-empty">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h11v8H3zM16 3h5v8h-5zM3 13h6v8H3zM11 13h10v8H11z"/></svg>
+          <div>
+            <strong>Pick a drive to scan</strong>
+            <p>You'll get a map of every folder, sized by how much space it uses. Scanning a full 2 TB drive takes about half a minute.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- CLEANUP -->
+      <section class="view" id="view-cleanup">
+        <header class="head">
+          <div>
+            <h1>Clean up</h1>
+            <p class="sub" id="cu-sub">Measuring the usual places where space builds up…</p>
+          </div>
+          <div class="head-actions"><button class="btn ghost" data-link="storage-settings">Windows storage settings</button><button class="btn ghost" id="cu-refresh">Measure again</button></div>
+        </header>
+        <div class="panel cleanup" id="cleanup"></div>
+      </section>
+
+      <!-- DRIVERS -->
+      <section class="view" id="view-drivers">
+        <header class="head">
+          <div>
+            <h1>Drivers</h1>
+            <p class="sub" id="dr-sub">Reading installed drivers. This takes a few seconds…</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn ghost" data-tool="devmgmt">Device Manager</button>
+            <button class="btn ghost" data-link="windows-update">Windows Update</button>
+            <button class="btn accent" data-health="drivers">Check drivers</button>
+          </div>
+        </header>
+        <div id="dr-highlights"></div>
+        <div class="dr-tools">
+          <input type="search" id="dr-search" placeholder="Search by device, maker or version" aria-label="Search drivers">
+          <select id="dr-class" aria-label="Device type"></select>
+          <label class="check"><input type="checkbox" id="dr-hide-ms" checked> Hide built-in Windows drivers</label>
+        </div>
+        <div class="panel file-table" id="dr-table"></div>
+      </section>
+
+      <!-- NETWORK -->
+      <section class="view" id="view-network">
+        <header class="head">
+          <div>
+            <h1>Internet</h1>
+            <p class="sub" id="net-sub">Checking your connection…</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn ghost" data-link="network-settings">Network settings</button>
+            <button class="btn accent" data-health="network">Check connection</button>
+          </div>
+        </header>
+        <div class="panel speed">
+          <div class="speed-main">
+            <div class="speed-gauge">
+              <div class="sg-label" id="sg-label">Download</div>
+              <div class="sg-value"><span id="sg-value" class="idle">0</span><span class="unit">Mbit/s</span></div>
+              <div class="sg-bar"><i id="sg-bar"></i></div>
+            </div>
+            <div class="speed-results">
+              <div><span class="k">Download</span><span class="v" id="sr-down">–</span></div>
+              <div><span class="k">Upload</span><span class="v" id="sr-up">–</span></div>
+              <div><span class="k">Ping</span><span class="v" id="sr-ping">–</span></div>
+              <div><span class="k">Jitter</span><span class="v" id="sr-jitter">–</span></div>
+            </div>
+            <div class="speed-cta">
+              <button class="btn primary" id="speed-start">Test internet speed</button>
+              <p class="fine" id="speed-note">Uses about 100–400 MB of data and takes around 20 seconds. Measured against Cloudflare's public speed test servers.</p>
+            </div>
+          </div>
+          <div class="speed-history"><h3>Earlier tests</h3><div id="speed-history"></div></div>
+        </div>
+        <div class="grid2">
+          <section class="panel block"><div class="block-head"><h2>Connection</h2></div><dl class="specs" id="net-conn"></dl></section>
+          <section class="panel block"><div class="block-head"><h2>Network adapters</h2></div><div id="net-ifaces"></div></section>
+        </div>
+      </section>
+
+      <!-- BLUETOOTH -->
+      <section class="view" id="view-bluetooth">
+        <header class="head">
+          <div>
+            <h1>Bluetooth</h1>
+            <p class="sub" id="bt-sub">Looking for your Bluetooth adapter…</p>
+          </div>
+          <div class="head-actions">
+            <button class="btn ghost" data-link="bluetooth-settings">Bluetooth settings</button>
+            <button class="btn accent" data-health="bluetooth">Check Bluetooth</button>
+          </div>
+        </header>
+        <div class="panel bt-adapter" id="bt-adapter"></div>
+        <h2 class="section-title" id="bt-conn-title">Connected</h2>
+        <div class="bt-grid" id="bt-connected"></div>
+        <h2 class="section-title">Paired, not connected</h2>
+        <div class="bt-grid" id="bt-paired"></div>
+        <p class="fine bt-foot">Battery levels come from the device itself. For devices that aren't connected, you see the last level Windows heard. The list refreshes every 10 seconds while this page is open.</p>
+      </section>
+    </main>
+  </div>
+</div>
+
+<div class="modal-back" id="modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h2 id="modal-title"></h2>
+    <p id="modal-body"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="modal-cancel">Cancel</button>
+      <button class="btn danger" id="modal-ok">OK</button>
+    </div>
+  </div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="categories.js"></script>
+<script src="format.js"></script>
+<script src="charts.js"></script>
+<script src="treemap.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

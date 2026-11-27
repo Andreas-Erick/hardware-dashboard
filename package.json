@@ -1,0 +1,19 @@
+{
+  "name": "hardware-dashboard",
+  "productName": "Hardware Dashboard",
+  "version": "1.0.0",
+  "description": "A friendly dashboard for watching your PC's hardware and finding where disk space went.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node scripts/smoke-test.js"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource/atkinson-hyperlegible": "^5.3.0",
+    "electron": "^45.5.0",
+    "systeminformation": "^5.33.26"
+  }
+}
