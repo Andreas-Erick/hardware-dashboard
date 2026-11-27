@@ -48,8 +48,8 @@ const fmt = (() => {
   }
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  const { CATS, extToCat, category } = window.HD_CATS;
+  const { CATS, category } = window.HD_CATS;
   const FOLDER_COLOR = '#78b2cf';
 
-  return { bytes, gb, pct, int, bps, rate, duration, ago, age, esc, CATS, category, extToCat, FOLDER_COLOR };
+  return { bytes, gb, pct, int, bps, rate, duration, ago, age, esc, CATS, category, FOLDER_COLOR };
 })();

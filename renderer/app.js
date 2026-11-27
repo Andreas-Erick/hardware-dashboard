@@ -1,8 +1,13 @@
-/* Hardware Dashboard: renderer. Talks to the main process only through window.hw (see preload.js). */
+/* Hardware Dashboard: renderer. Talks to the main process only through window.hw (built in preload.js from src/ipc.js).
+ * Every hw call resolves with its value or rejects with a message that can be shown to the user as-is.
+ *
+ * Each page is a view: { enter(), leave() }. show(id) leaves the current view and enters the next one.
+ * Views don't call each other; they talk through `bus` events ('scan' a folder, something was 'trashed'). */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const C = { amber: css('--amber'), ice: css('--ice'), hot: css('--hot'), ok: css('--ok') };
+const R = window.HD_RULES;
 const svg = (d) => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
 const ICON = {
   reveal: svg('M3 5h7l2 2h9v12H3zM5 9v8h14V9z'),
@@ -35,34 +40,63 @@ function battHtml(p, stale) {
   const cls = p <= 20 ? 'low' : p <= 40 ? 'mid' : '';
   return `<span class="batt ${cls}" title="${stale ? 'Last known level' : 'Battery level'}"><i style="--p:${p / 100}"></i>${p}%${stale ? '<span class="muted small" style="font-family:var(--body);font-weight:400">&nbsp;last known</span>' : ''}</span>`;
 }
+/** Bluetooth radio states from the main process: 'on' | 'off' | 'disabled' | 'unknown'. */
+const radioOff = (radio) => radio === 'off' || radio === 'disabled';
 
 const state = {
   static: null,
-  live: null,
   admin: false,
-  drives: [],
   scan: { root: null, cur: null, running: false, done: null, data: null },
-  loaded: {},
 };
 
-// ---------- Shared UI: navigation, modal, toasts ----------
-function show(view) {
-  $$('.nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
-  $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${view}`));
+// ---------- Shared UI: events, navigation, modal, toasts ----------
+const bus = (() => {
+  const subs = {};
+  return {
+    on: (ev, fn) => (subs[ev] = subs[ev] || []).push(fn),
+    emit: (ev, data) => (subs[ev] || []).forEach((fn) => fn(data)),
+  };
+})();
+
+function toast(msg, err = false) {
+  const t = document.createElement('div');
+  t.className = `toast${err ? ' err' : ''}`;
+  t.textContent = msg;
+  $('#toasts').appendChild(t);
+  setTimeout(() => t.remove(), err ? 7000 : 4500);
+}
+/** Run an hw call; on failure show its message and resolve undefined. */
+async function attempt(fn) {
+  try { return await fn(); } catch (e) { toast(e.message, true); return undefined; }
+}
+
+const views = {};
+let current = 'overview';
+function show(id) {
+  if (!views[id]) return;
+  $$('.nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === id));
+  $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${id}`));
   $('.main').scrollTop = 0;
-  if (view === 'storage') storageView.enter();
-  if (view === 'cleanup' && !state.loaded.cleanup) cleanupView.load();
-  if (view === 'drivers' && !state.loaded.drivers) driversView.load();
-  if (view === 'network') networkView.enter();
-  bluetoothView.setActive(view === 'bluetooth');
+  if (current !== id && views[current].leave) views[current].leave();
+  current = id;
+  if (views[id].enter) views[id].enter();
 }
 $$('.nav button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
+
+async function relaunchAdmin() {
+  if (!(await attempt(() => hw.relaunchAdmin()))) toast('Restart as administrator was cancelled.', true);
+}
+// Actions anywhere on the page, including the ones in health findings.
 document.addEventListener('click', (e) => {
-  const g = e.target.closest('[data-goto]'); if (g) show(g.dataset.goto);
-  const l = e.target.closest('[data-link]'); if (l) hw.openLink(l.dataset.link);
-  const t = e.target.closest('[data-tool]'); if (t) hw.openTool(t.dataset.tool);
-  const h = e.target.closest('[data-health]');
-  if (h) { show('health'); h.dataset.health === 'all' ? healthView.runAll() : healthView.run(h.dataset.health); }
+  const a = e.target.closest('[data-goto],[data-link],[data-tool],[data-health],[data-admin],[data-battery-report]');
+  if (!a) return;
+  const d = a.dataset;
+  if (d.goto) show(d.goto);
+  else if (d.link) attempt(() => hw.openLink(d.link));
+  else if (d.tool) attempt(() => hw.openTool(d.tool));
+  else if (d.health) { show('health'); d.health === 'all' ? views.health.runAll() : views.health.run(d.health); }
+  else if ('admin' in d) relaunchAdmin();
+  else if ('batteryReport' in d) attempt(() => hw.batteryReport());
 });
 
 function confirmModal({ title, body, ok = 'OK', danger = true }) {
@@ -83,14 +117,6 @@ function confirmModal({ title, body, ok = 'OK', danger = true }) {
   });
 }
 
-function toast(msg, err = false) {
-  const t = document.createElement('div');
-  t.className = `toast${err ? ' err' : ''}`;
-  t.textContent = msg;
-  $('#toasts').appendChild(t);
-  setTimeout(() => t.remove(), err ? 7000 : 4500);
-}
-
 const meterClass = (p) => (p >= 90 ? 'full' : p >= 75 ? 'warn' : '');
 function setMeter(el, p) {
   el.className = `meter ${meterClass(p)}`;
@@ -98,7 +124,8 @@ function setMeter(el, p) {
 }
 
 // ---------- Overview ----------
-const overview = (() => {
+// Always running: it also feeds the sidebar meters.
+views.overview = (() => {
   const ro = (id) => { const el = $(id); const k = {}; $$('[data-k]', el).forEach((x) => (k[x.dataset.k] = x)); return { el, ...k }; };
   const cpu = ro('#ro-cpu'), mem = ro('#ro-mem'), gpu = ro('#ro-gpu');
   const sparks = {
@@ -123,7 +150,7 @@ const overview = (() => {
       ['Graphics', s.gpus.map((g) => `${g.model}${g.vram ? ` (${fmt.gb(g.vram, 0)} GB)` : ''}`).join(' and ')],
       ['Storage', s.disks.map((d) => `${d.name.replace(/_/g, ' ')}, ${fmt.bytes(d.size, 0)} ${d.iface || ''} ${d.type || ''}`.trim()).join(' and ')],
       ['Windows', `${s.os.distro.replace('Microsoft ', '')}, build ${s.os.build}`],
-    ].map(([k, v]) => [k || ' ', v]);
+    ];
     $('#specs').innerHTML = rows.map(([k, v]) => `<dt>${fmt.esc(k)}</dt><dd>${fmt.esc(v)}</dd>`).join('') + '<dt>Running for</dt><dd id="uptime">–</dd>';
     cpu.cores.innerHTML = Array.from({ length: s.cpu.threads }, () => '<i></i>').join('');
   }
@@ -139,17 +166,16 @@ const overview = (() => {
       cpu.el.classList.toggle('hot', l.cpu.load >= 90);
     }
     if (l.mem) {
-      const p = (l.mem.used / l.mem.total) * 100;
       mem.v.textContent = fmt.gb(l.mem.used);
       mem.meta.textContent = `of ${fmt.gb(l.mem.total, 0)} GB, ${fmt.gb(l.mem.available)} GB free`;
-      setMeter(mem.meter, p);
-      sparks.mem.push(p);
-      mem.el.classList.toggle('hot', p >= 90);
+      setMeter(mem.meter, l.mem.percent);
+      sparks.mem.push(l.mem.percent);
+      mem.el.classList.toggle('hot', l.mem.percent >= 90);
     }
     const g = l.gpus[0];
     if (g) {
       gpu.v.textContent = g.util ?? '–';
-      gpu.meta.textContent = `${g.name.replace('NVIDIA GeForce ', '')}${g.temp != null ? `, ${g.temp} °C` : ''}${g.power != null ? `, ${Math.round(g.power)} W` : ''}${g.clock ? `, ${g.clock} MHz` : ''}`;
+      gpu.meta.textContent = `${R.shortGpuName(g.name)}${g.temp != null ? `, ${g.temp} °C` : ''}${g.power != null ? `, ${Math.round(g.power)} W` : ''}${g.clock ? `, ${g.clock} MHz` : ''}`;
       sparks.gpu.push(g.util);
       if (g.vramTotal) {
         gpu.vram.textContent = `${fmt.gb(g.vramUsed)} of ${fmt.gb(g.vramTotal, 0)} GB`;
@@ -181,35 +207,37 @@ const overview = (() => {
       b.className = meterClass(pct || 0);
     };
     if (l.cpu) set('cpu', l.cpu.load, `${Math.round(l.cpu.load)}%`);
-    if (l.mem) set('mem', (l.mem.used / l.mem.total) * 100, `${fmt.gb(l.mem.used)} GB`);
+    if (l.mem) set('mem', l.mem.percent, `${fmt.gb(l.mem.used)} GB`);
     const g = l.gpus[0];
     if (g) set('gpu', g.util, `${g.util ?? '–'}%`);
     else $('[data-sl="gpu"]').closest('.sl').hidden = true;
   }
 
   async function renderBluetooth() {
-    const b = await hw.bluetooth();
     const el = $('#ov-bt');
-    if (!b.ok || !b.adapters.length) { el.innerHTML = '<p class="muted small">No Bluetooth adapter found.</p>'; return; }
-    if (b.radio === 'Off') { el.innerHTML = '<p class="muted small">Bluetooth is turned off.</p><button class="mini-link" data-link="bluetooth-settings">Turn it on in settings</button>'; return; }
+    let b;
+    try { b = await hw.bluetooth(); } catch (e) { el.innerHTML = `<p class="muted small">${fmt.esc(e.message)}</p>`; return; }
+    if (!b.adapters.length) { el.innerHTML = '<p class="muted small">No Bluetooth adapter found.</p>'; return; }
+    if (radioOff(b.radio)) { el.innerHTML = '<p class="muted small">Bluetooth is turned off.</p><button class="mini-link" data-link="bluetooth-settings">Turn it on in settings</button>'; return; }
     const conn = b.devices.filter((d) => d.connected);
     el.innerHTML = conn.length
       ? conn.slice(0, 5).map((d) => `<div class="ov-bt-row">${ICON[d.kind] || ICON.other}<span title="${fmt.esc(d.name)}">${fmt.esc(d.name)}</span>${d.battery != null ? battHtml(d.battery) : ''}</div>`).join('')
       : `<p class="muted small">Nothing connected right now. ${b.devices.length} paired device${b.devices.length === 1 ? '' : 's'}.</p>`;
   }
 
-  function tempRow(name, t, warm, hot) {
-    if (t == null) return '';
-    const cls = t >= hot ? 'hot' : t >= warm ? 'warm' : '';
-    return `<li><span>${fmt.esc(name)}</span><span class="deg ${cls}">${Math.round(t)} °C</span></li>`;
+  // Same thresholds as the health check (shared/hardware-rules.js).
+  function tempRow(name, part, t) {
+    const level = R.tempLevel(part, t);
+    if (!level) return '';
+    return `<li><span>${fmt.esc(name)}</span><span class="deg ${level === 'ok' ? '' : level}">${Math.round(t)} °C</span></li>`;
   }
   function renderTemps(l) {
     let html = '';
     html += l.cpu && l.cpu.temp != null
-      ? tempRow('Processor', l.cpu.temp, 80, 92)
+      ? tempRow('Processor', 'cpu', l.cpu.temp)
       : '<li><span>Processor</span><span class="na">Not available</span></li>';
-    for (const g of l.gpus) html += tempRow(g.name.replace('NVIDIA GeForce ', ''), g.temp, 78, 87);
-    for (const d of l.diskTemps) html += tempRow(d.name, d.temp, 60, 70);
+    for (const g of l.gpus) html += tempRow(R.shortGpuName(g.name), 'gpu', g.temp);
+    for (const d of l.diskTemps) html += tempRow(d.name, 'disk', d.temp);
     if (!l.diskTemps.length) html += '<li><span>SSD</span><span class="na">Not available</span></li>';
     if (l.battery) html += `<li><span>Battery</span><span class="deg">${l.battery.percent}%</span></li>`;
     $('#temps').innerHTML = html;
@@ -219,14 +247,11 @@ const overview = (() => {
     if (missing) {
       note.innerHTML = state.admin
         ? "Windows doesn't expose every sensor on this PC. Your laptop maker's app or HWiNFO can read them straight from the chip."
-        : 'Windows only shares processor and SSD temperatures with apps running as administrator. <button class="link" id="go-admin">Restart as administrator</button>';
-      const b = $('#go-admin');
-      if (b) b.onclick = async () => { if (!(await hw.relaunchAdmin())) toast('Restart as administrator was cancelled.', true); };
+        : 'Windows only shares processor and SSD temperatures with apps running as administrator. <button class="link" data-admin>Restart as administrator</button>';
     }
   }
 
   function renderDrives(drives) {
-    state.drives = drives;
     $('#ov-drives').innerHTML = drives.map((d) => {
       const p = (d.used / d.size) * 100;
       return `<div class="drive"><div class="row-between"><strong>${fmt.esc(d.mount)}</strong><span>${fmt.bytes(d.free)} free</span></div>
@@ -239,15 +264,15 @@ const overview = (() => {
   async function tick() {
     if (busy) return;
     busy = true;
-    try { state.live = await hw.live(); renderLive(state.live); } catch (e) { console.error(e); }
+    try { renderLive(await hw.live()); } catch (e) { console.error(e); }
     busy = false;
   }
-  async function pingTick() { const s = await hw.netStatus(); ping = s.latency; }
+  async function pingTick() { try { ping = (await hw.netStatus()).latency; } catch { ping = null; } }
 
-  async function start() {
-    hw.isAdmin().then((a) => (state.admin = a));
+  function start() {
+    hw.isAdmin().then((a) => (state.admin = a), () => {});
     tick();
-    hw.staticInfo().then((s) => { state.static = s; renderStatic(s); });
+    hw.staticInfo().then((s) => { state.static = s; renderStatic(s); }, (e) => console.error(e));
     setInterval(tick, 1500);
     pingTick(); setInterval(pingTick, 10000);
     renderBluetooth(); setInterval(renderBluetooth, 20000);
@@ -256,28 +281,24 @@ const overview = (() => {
 })();
 
 // ---------- Disk space ----------
-const storageView = (() => {
+views.storage = (() => {
   const tip = makeTip();
   let tab = 'map';
-  let lastProgress = 0;
 
   const lighten = (hex, t) => {
     const n = parseInt(hex.slice(1), 16);
     const ch = (s) => Math.round(((n >> s) & 255) + (255 - ((n >> s) & 255)) * t);
     return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
   };
-  // Folders take the colour of whatever fills most of them, so a folder full of videos reads as video at a glance.
-  const mostly = (item) => (item.isDir && item.dom && item.dom.share >= 0.4 && item.dom.cat !== 'other' ? item.dom.cat : null);
+  // Folders take the colour of whatever fills most of them (`mostly`), so a folder full of videos reads as video at a glance.
+  const catOf = (item) => item.cat || fmt.category(item.name);
   function colorOf(item, inner) {
-    let c;
-    if (item.isDir) c = mostly(item) ? fmt.CATS[item.dom.cat].color : fmt.FOLDER_COLOR;
-    else c = fmt.CATS[fmt.category(item.name)].color;
+    const c = item.isDir ? (item.mostly ? fmt.CATS[item.mostly].color : fmt.FOLDER_COLOR) : fmt.CATS[catOf(item)].color;
     return inner ? lighten(c, 0.22) : c;
   }
 
   async function renderDriveCards() {
-    const drives = state.drives.length ? state.drives : await hw.drives();
-    state.drives = drives;
+    const drives = (await attempt(() => hw.drives())) || [];
     $('#drive-row').innerHTML = drives.map((d) => {
       const p = (d.used / d.size) * 100;
       return `<div class="drive-card">
@@ -290,27 +311,26 @@ const storageView = (() => {
     $$('[data-scan]').forEach((b) => b.addEventListener('click', () => start(b.dataset.scan)));
   }
 
-  async function start(root) {
+  async function start(folder) {
     if (state.scan.running) {
       const ok = await confirmModal({ title: 'Stop the current scan?', body: 'A scan is already running. Starting a new one stops it.', ok: 'Start new scan', danger: false });
       if (!ok) return;
     }
-    const r = await hw.scanStart(root);
-    if (!r.ok) return toast(r.error, true);
-    Object.assign(state.scan, { root: r.root, cur: r.root, running: true, done: null });
+    const root = await attempt(() => hw.scanStart(folder));
+    if (!root) return;
+    Object.assign(state.scan, { root, cur: root, running: true, done: null, data: null });
     $('#storage-empty').hidden = true;
     $('#explorer').hidden = true;
     $('#scan-progress').hidden = false;
-    $('#sp-title').textContent = `Scanning ${r.root}`;
+    $('#sp-title').textContent = `Scanning ${root}`;
     $('#sp-stats').textContent = 'Starting…';
     $('#sp-path').textContent = '';
     show('storage');
   }
+  bus.on('scan', start);
 
+  // The scan sends progress four times a second.
   hw.onScanProgress((s) => {
-    const now = performance.now();
-    if (now - lastProgress < 200) return;
-    lastProgress = now;
     $('#sp-stats').textContent = `${fmt.bytes(s.bytes)} found in ${fmt.int(s.files)} files and ${fmt.int(s.dirs)} folders`;
     $('#sp-path').textContent = s.current;
   });
@@ -318,13 +338,17 @@ const storageView = (() => {
     state.scan.running = false;
     state.scan.done = s;
     $('#scan-progress').hidden = true;
-    if (s.error) toast(`The scan stopped because of an error: ${s.error}`, true);
+    if (s.error) {
+      toast(`The scan stopped because of an error: ${s.error}`, true);
+      $('#storage-empty').hidden = false;
+      return;
+    }
     $('#explorer').hidden = false;
     open(state.scan.root);
   });
 
-  $('#scan-cancel').addEventListener('click', () => hw.scanCancel());
-  $('#scan-folder').addEventListener('click', async () => { const p = await hw.pickFolder(); if (p) start(p); });
+  $('#scan-cancel').addEventListener('click', () => attempt(() => hw.scanCancel()));
+  $('#scan-folder').addEventListener('click', async () => { const p = await attempt(() => hw.pickFolder()); if (p) start(p); });
   $('#ex-up').addEventListener('click', () => { if (state.scan.data && state.scan.data.parent) open(state.scan.data.parent); });
   $$('.tabs button').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
 
@@ -337,15 +361,9 @@ const storageView = (() => {
     if (t === 'map') drawMap();
   }
 
-  function driveFor(p) {
-    const m = p.slice(0, 2).toUpperCase();
-    return state.drives.find((d) => d.mount.toUpperCase() === m);
-  }
-  const isDriveRoot = (p) => /^[A-Z]:\\?$/i.test(p);
-
   async function open(p) {
-    const data = await hw.scanChildren(p);
-    if (!data) return toast("That folder isn't part of the scan any more.", true);
+    const data = await attempt(() => hw.scanChildren(p));
+    if (!data) return;
     state.scan.cur = data.path;
     state.scan.data = data;
     renderCrumbs(data);
@@ -355,12 +373,7 @@ const storageView = (() => {
   }
 
   function renderCrumbs(data) {
-    const root = state.scan.root;
-    const rel = data.path.slice(root.length).split('\\').filter(Boolean);
-    const parts = [{ name: root, path: root }];
-    let acc = root;
-    for (const seg of rel) { acc = acc.endsWith('\\') ? acc + seg : `${acc}\\${seg}`; parts.push({ name: seg, path: acc }); }
-    $('#crumbs').innerHTML = parts.map((x, i) => `${i ? '<span class="sep">›</span>' : ''}<button data-p="${fmt.esc(x.path)}">${fmt.esc(x.name)}</button>`).join('');
+    $('#crumbs').innerHTML = data.crumbs.map((x, i) => `${i ? '<span class="sep">›</span>' : ''}<button data-p="${fmt.esc(x.path)}">${fmt.esc(x.name)}</button>`).join('');
     $$('#crumbs button').forEach((b) => b.addEventListener('click', () => open(b.dataset.p)));
     $('#ex-up').disabled = !data.parent;
   }
@@ -368,13 +381,12 @@ const storageView = (() => {
   function renderSummary(data) {
     const s = state.scan.done || {};
     let text = `<strong>${fmt.bytes(data.size)}</strong> in ${fmt.int(data.count)} files.`;
-    if (data.path === state.scan.root) {
+    if (data.isRoot) {
       const secs = s.finishedAt ? ((s.finishedAt - s.startedAt) / 1000).toFixed(1) : null;
       if (secs) text += ` Scanned in ${secs} seconds.`;
       if (s.cancelled) text += ' You stopped the scan early, so some folders are missing.';
       if (s.denied) text += ` ${fmt.int(s.denied)} folders couldn't be opened without administrator rights.`;
-      const d = driveFor(data.path);
-      if (d && isDriveRoot(data.path) && data.size > d.used * 1.03) {
+      if (data.overcounted) {
         text += ' The total is higher than the space actually used because Windows stores some files once and links them from several places, and cloud-only OneDrive files count at full size.';
       }
     }
@@ -383,13 +395,9 @@ const storageView = (() => {
 
   function mapItems(data) {
     const items = data.items.filter((i) => i.size > 0).slice(0, 160);
-    const d = driveFor(data.path);
-    if (d && isDriveRoot(data.path) && data.path === state.scan.root) {
-      const missing = d.used - data.size;
-      if (missing > d.size * 0.01) {
-        items.push({ name: 'System and unreadable files', size: missing, unread: true, note: `${fmt.bytes(missing)} Windows uses but won't let a normal app look into: restore points, the page file, other users' folders and similar.` });
-        items.sort((a, b) => b.size - a.size);
-      }
+    if (data.unreadable) {
+      items.push({ name: 'System and unreadable files', size: data.unreadable, unread: true, note: `${fmt.bytes(data.unreadable)} Windows uses but won't let a normal app look into: restore points, the page file, other users' folders and similar.` });
+      items.sort((a, b) => b.size - a.size);
     }
     return items;
   }
@@ -401,7 +409,7 @@ const storageView = (() => {
       colorOf,
       tip,
       onOpen: (r) => { tip.hide(); open(r.path); },
-      onReveal: (r) => hw.reveal(r.path),
+      onReveal: (r) => attempt(() => hw.reveal(r.path)),
     });
     renderLegend(data);
   }
@@ -409,23 +417,23 @@ const storageView = (() => {
 
   function renderLegend(data) {
     const used = new Set();
-    const note = (i) => { if (i.isDir) { if (mostly(i)) used.add(i.dom.cat); } else used.add(fmt.category(i.name)); };
+    const note = (i) => { if (i.isDir) { if (i.mostly) used.add(i.mostly); } else used.add(catOf(i)); };
     for (const i of data.items.slice(0, 160)) { note(i); if (i.sub) i.sub.forEach(note); }
     const parts = [`<span><i style="background:${fmt.FOLDER_COLOR}"></i>Mixed folders</span>`];
     for (const [k, v] of Object.entries(fmt.CATS)) if (used.has(k)) parts.push(`<span><i style="background:${v.color}"></i>${v.label}</span>`);
     $('#legend').innerHTML = parts.join('') + '<span style="margin-left:auto">Folders take the colour of what fills most of them. Click one to open it.</span>';
   }
 
-  function itemRow(i, parentSize, withPath) {
+  function itemRow(i, parentSize) {
     const pct = parentSize ? (i.size / parentSize) * 100 : 0;
     const desc = i.isDir
-      ? `${mostly(i) ? `Mostly ${fmt.CATS[i.dom.cat].label.toLowerCase()}, ` : ''}${fmt.int(i.count)} file${i.count === 1 ? '' : 's'}${i.denied ? ', some unreadable' : ''}`
-      : fmt.CATS[fmt.category(i.name)].label;
+      ? `${i.mostly ? `Mostly ${fmt.CATS[i.mostly].label.toLowerCase()}, ` : ''}${fmt.int(i.count)} file${i.count === 1 ? '' : 's'}${i.denied ? ', some unreadable' : ''}`
+      : fmt.CATS[catOf(i)].label;
     return `<div class="ex-item">
       <span class="dot" style="background:${colorOf(i)}"></span>
       <div class="nm">
         <button class="${i.isDir ? 'dir' : 'file'}" data-open="${i.isDir ? fmt.esc(i.path) : ''}" title="${fmt.esc(i.path)}">${fmt.esc(i.name)}</button>
-        <small>${withPath ? fmt.esc(i.path) : `${desc}, ${pct.toFixed(1)}%`}</small>
+        <small>${desc}, ${pct.toFixed(1)}%</small>
         <div class="pct"><i style="width:${pct}%"></i></div>
       </div>
       <span class="sz">${fmt.bytes(i.size)}</span>
@@ -437,11 +445,9 @@ const storageView = (() => {
   }
 
   function renderList(data) {
-    const items = data.items.slice(0, 200);
-    let html = items.map((i) => itemRow(i, data.size)).join('');
-    const more = data.items.length - items.length + data.hiddenCount;
-    if (more > 0) html += `<div class="ex-more">${fmt.int(more)} smaller items not shown.</div>`;
-    if (!items.length) html = '<div class="ex-more">This folder is empty.</div>';
+    let html = data.items.map((i) => itemRow(i, data.size)).join('');
+    if (data.hiddenCount > 0) html += `<div class="ex-more">${fmt.int(data.hiddenCount)} smaller items not shown.</div>`;
+    if (!data.items.length) html = '<div class="ex-more">This folder is empty.</div>';
     $('#ex-list').innerHTML = html;
   }
 
@@ -450,7 +456,7 @@ const storageView = (() => {
     const o = e.target.closest('[data-open]');
     if (o && o.dataset.open) return open(o.dataset.open);
     const r = e.target.closest('[data-reveal]');
-    if (r) return hw.reveal(r.dataset.reveal);
+    if (r) return attempt(() => hw.reveal(r.dataset.reveal));
     const t = e.target.closest('[data-trash]');
     if (t) return trash(t.dataset.trash, t.dataset.name, Number(t.dataset.size));
   });
@@ -463,66 +469,51 @@ const storageView = (() => {
       ok: 'Move to Recycle Bin',
     });
     if (!ok) return;
-    const r = await hw.trash(p);
-    if (!r.ok) return toast(r.error, true);
+    try { await hw.trash(p); } catch (e) { return toast(e.message, true); }
     toast(`Moved “${name}” to the Recycle Bin. Empty it on the Clean up page to get the ${fmt.bytes(size)} back.`);
-    state.loaded.cleanup = false;
+    bus.emit('trashed', p);
     await open(state.scan.cur);
     if (tab === 'largest') renderLargest();
   }
 
   async function renderLargest() {
-    const rows = (await hw.scanLargest()) || [];
-    const total = state.scan.done ? state.scan.done.bytes : 0;
+    const rows = (await attempt(() => hw.scanLargest())) || [];
     $('#largest').innerHTML = `<div class="ft-row head-row" style="grid-template-columns:minmax(0,1fr) 120px 80px"><span>The ${rows.length} biggest files in ${fmt.esc(state.scan.root)}</span><span class="num" style="font:inherit">Size</span><span></span></div>` +
-      rows.map((f) => {
-        const name = f.path.split('\\').pop();
-        return `<div class="ft-row"><div class="path"><b><span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:8px;background:${colorOf({ name })}"></span>${fmt.esc(name)}</b><small>${fmt.esc(f.path)}</small></div>
+      rows.map((f) => `<div class="ft-row"><div class="path"><b><span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:8px;background:${colorOf(f)}"></span>${fmt.esc(f.name)}</b><small>${fmt.esc(f.path)}</small></div>
           <span class="num">${fmt.bytes(f.size)}</span>
           <span class="acts"><button class="icon-btn" data-reveal="${fmt.esc(f.path)}" title="Show in Explorer" aria-label="Show in Explorer">${ICON.reveal}</button>
-          <button class="icon-btn del" data-trash="${fmt.esc(f.path)}" data-size="${f.size}" data-name="${fmt.esc(name)}" title="Move to Recycle Bin" aria-label="Move to Recycle Bin">${ICON.trash}</button></span></div>`;
-      }).join('') + (total ? '' : '');
+          <button class="icon-btn del" data-trash="${fmt.esc(f.path)}" data-size="${f.size}" data-name="${fmt.esc(f.name)}" title="Move to Recycle Bin" aria-label="Move to Recycle Bin">${ICON.trash}</button></span></div>`).join('');
   }
 
   async function renderTypes() {
-    const rows = (await hw.scanTypes()) || [];
+    const rows = (await attempt(() => hw.scanTypes())) || [];
     const max = rows[0] ? rows[0].size : 1;
     $('#types').innerHTML = `<div class="ft-row types-row head-row"><span>Type</span><span>Share of scanned space</span><span class="num" style="font:inherit">Size</span><span class="num" style="font:inherit">Files</span></div>` +
       rows.map((t) => {
-        const cat = t.ext === '(none)' ? 'other' : (fmt.extToCat[t.ext] || 'other');
-        const color = fmt.CATS[cat].color;
+        const cat = fmt.CATS[t.cat];
         return `<div class="ft-row types-row"><span class="ext">${fmt.esc(t.ext === '(none)' ? 'No extension' : t.ext)}</span>
-          <div><div class="bar"><i style="width:${(t.size / max) * 100}%;background:${color}"></i></div><small style="color:var(--faint);font-size:12px">${fmt.esc(fmt.CATS[cat].label)}</small></div>
+          <div><div class="bar"><i style="width:${(t.size / max) * 100}%;background:${cat.color}"></i></div><small style="color:var(--faint);font-size:12px">${fmt.esc(cat.label)}</small></div>
           <span class="num">${fmt.bytes(t.size)}</span><span class="num" style="font:inherit;color:var(--muted)">${fmt.int(t.count)}</span></div>`;
       }).join('');
   }
 
-  return {
-    enter() { renderDriveCards(); },
-    start,
-  };
+  return { enter: renderDriveCards };
 })();
 
 // ---------- Clean up ----------
-const cleanupView = (() => {
+views.cleanup = (() => {
   const items = new Map();
+  let fresh = false;
   const TAG = { clear: 'Safe to clear', review: 'Your files', system: 'Managed by Windows', info: 'For information' };
-
   const ORDER = { clear: 0, review: 1, system: 2, info: 3 };
-  const PART_NAMES = [
-    [/Google\\Chrome/i, 'Chrome'], [/Microsoft\\Edge/i, 'Edge'], [/Brave/i, 'Brave'], [/NVIDIA/i, 'NVIDIA'], [/D3DSCache/i, 'DirectX'],
-    [/\\AMD\\/i, 'AMD'], [/\\Intel\\/i, 'Intel'], [/npm-cache/i, 'npm'], [/\\pip\\/i, 'pip'], [/Yarn/i, 'Yarn'], [/pnpm/i, 'pnpm'],
-    [/\.nuget/i, 'NuGet'], [/\.gradle/i, 'Gradle'], [/CrashDumps/i, 'App crash dumps'], [/\\WER\\/i, 'Windows error reports'],
-    [/SoftwareDistribution/i, 'Update downloads'], [/Windows\.old/i, 'Previous Windows'],
-  ];
+
+  // Moving something to the Recycle Bin changes its size.
+  bus.on('trashed', () => { fresh = false; });
+
+  /** "Chrome: 1.2 GB, Edge: 300 MB" from the parts each item reports. */
   function partsNote(parts) {
     const agg = new Map();
-    for (const p of parts) {
-      if (!(p.size > 0)) continue;
-      const hit = PART_NAMES.find(([re]) => re.test(p.path));
-      const name = hit ? hit[1] : p.path.split('\\').slice(-2).join('\\');
-      agg.set(name, (agg.get(name) || 0) + p.size);
-    }
+    for (const p of parts) if (p.size > 0) agg.set(p.label, (agg.get(p.label) || 0) + p.size);
     return [...agg].sort((a, b) => b[1] - a[1]).map(([n, s]) => `${n}: ${fmt.bytes(s)}`).join(', ');
   }
 
@@ -532,20 +523,18 @@ const cleanupView = (() => {
       const sz = i.size;
       const cls = sz == null ? 'zero' : sz > 1024 ** 3 ? 'lots' : sz < 1024 ** 2 ? 'zero' : '';
       const sizeTxt = sz == null ? (i.measuring ? 'Measuring…' : 'Unknown') : fmt.bytes(sz);
-      let note = '';
-      if (i.denied) note = 'Part of this needs administrator rights to read.';
-      if (i.id === 'hiber' && i.parts && i.parts.length) {
-        note = i.parts.map((p) => `${p.name}: ${fmt.bytes(p.size)}`).join(', ');
-        const h = i.parts.find((p) => /hiberfil/i.test(p.name));
-        if (h && h.size > 1024 ** 3) note += `. If you never use hibernation, running “powercfg /h off” in an administrator terminal gives back ${fmt.bytes(h.size)} (it also turns off Fast Startup).`;
-      }
-      if (i.parts && i.id !== 'hiber' && i.parts.length > 1) note = partsNote(i.parts);
+      const notes = [];
+      if (i.note) notes.push(i.note);
+      if (i.denied) notes.push('Part of this needs administrator rights to read.');
+      // Single-folder items need no breakdown; the "for information" items always show what they consist of.
+      if (i.parts && (i.parts.length > 1 || i.kind === 'info')) { const n = partsNote(i.parts); if (n) notes.push(n); }
+      if (i.advice) notes.push(i.advice.text.replace('this space', fmt.bytes(i.advice.size)));
       let act = '';
       if (i.kind === 'clear') act = `<button class="btn" data-clear="${i.id}" ${!sz || sz < 1024 * 1024 ? 'disabled' : ''}>${fmt.esc(i.action)}</button>`;
-      else if (i.kind === 'review') act = `<button class="btn" data-review="${i.id}">${fmt.esc(i.action)}</button>`;
+      else if (i.kind === 'review') act = `<button class="btn" data-review="${i.id}" ${i.review ? '' : 'disabled'}>${fmt.esc(i.action)}</button>`;
       else if (i.kind === 'system') act = `<button class="btn" data-tool="${i.tool}">${fmt.esc(i.action)}</button>`;
       return `<div class="cu-item">
-        <div><h3>${fmt.esc(i.title)}<span class="tag">${TAG[i.kind]}</span></h3><p>${fmt.esc(i.why)}</p>${note ? `<div class="parts">${fmt.esc(note)}</div>` : ''}</div>
+        <div><h3>${fmt.esc(i.title)}<span class="tag">${TAG[i.kind]}</span></h3><p>${fmt.esc(i.why)}</p>${notes.length ? `<div class="parts">${fmt.esc(notes.join('. '))}</div>` : ''}</div>
         <div class="size ${cls}">${sizeTxt}${i.files ? `<small>${fmt.int(i.files)} files</small>` : ''}</div>
         <div class="act">${act}</div>
       </div>`;
@@ -560,11 +549,11 @@ const cleanupView = (() => {
   hw.onCleanupItem((i) => { items.set(i.id, { ...i, measuring: false }); render(); });
 
   async function load() {
-    state.loaded.cleanup = true;
+    fresh = true;
     for (const [k, v] of items) items.set(k, { ...v, measuring: true });
     if (!items.size) $('#cleanup').innerHTML = '<div class="skeleton">Measuring…</div>';
-    render();
-    await hw.cleanupList();
+    else render();
+    await attempt(() => hw.cleanupList());
     render();
   }
 
@@ -576,25 +565,27 @@ const cleanupView = (() => {
       if (!ok) return;
       c.disabled = true;
       c.textContent = 'Working…';
-      const r = await hw.cleanupClear(i.id);
-      if (!r.ok) { toast(r.error, true); render(); return; }
-      items.set(i.id, { ...r.item, measuring: false });
+      let r;
+      try { r = await hw.cleanupClear(i.id); } catch (err) { toast(err.message, true); render(); return; }
+      items.set(i.id, { ...r, measuring: false });
       render();
-      toast(r.item.freed > 0 ? `${i.title}: freed ${fmt.bytes(r.item.freed)}.` : `${i.title}: nothing could be removed. The files may be in use.`, r.item.freed <= 0);
+      if (r.freed > 0) toast(`${i.title}: freed ${fmt.bytes(r.freed)}${r.skipped ? `. ${fmt.int(r.skipped)} items were in use or too new and were kept` : ''}.`);
+      else toast(`${i.title}: nothing could be removed. ${r.skipped ? 'The files are in use or too new.' : 'There was nothing to remove.'}`, true);
     }
     const rv = e.target.closest('[data-review]');
     if (rv) {
       const i = items.get(rv.dataset.review);
-      if (i.parts && i.parts[0]) storageView.start(i.parts[0].path);
+      if (i.review) bus.emit('scan', i.review);
     }
   });
   $('#cu-refresh').addEventListener('click', load);
-  return { load };
+  return { enter() { if (!fresh) load(); } };
 })();
 
 // ---------- Drivers ----------
-const driversView = (() => {
+views.drivers = (() => {
   let all = [];
+  let loaded = false;
   const CLS = {
     DISPLAY: 'Graphics', NET: 'Network', MEDIA: 'Sound', AUDIOENDPOINT: 'Audio endpoint', SYSTEM: 'System', USB: 'USB',
     HIDCLASS: 'Input device', KEYBOARD: 'Keyboard', MOUSE: 'Mouse', BLUETOOTH: 'Bluetooth', CAMERA: 'Camera', IMAGE: 'Camera',
@@ -606,23 +597,21 @@ const driversView = (() => {
     SECURITYACCELERATOR: 'Security', WPD: 'Portable device', SMARTCARDFILTER: 'Smart card',
   };
   const clsName = (c) => CLS[(c || '').toUpperCase()] || (c ? c.charAt(0) + c.slice(1).toLowerCase() : 'Other');
-  const isMs = (d) => /^microsoft$/i.test(d.provider) || (!d.provider && /^microsoft$/i.test(d.maker));
-  function vendorLink(d) {
-    const s = `${d.provider} ${d.maker} ${d.name}`;
-    if (/nvidia/i.test(s)) return ['nvidia-drivers', 'Get the latest NVIDIA driver'];
-    if (/\bamd\b|advanced micro/i.test(s)) return ['amd-drivers', 'Get the latest AMD driver'];
-    if (/intel|killer/i.test(s)) return ['intel-drivers', 'Check with Intel Driver Assistant'];
-    return ['optional-updates', 'Look in optional Windows updates'];
-  }
 
   async function load() {
-    state.loaded.drivers = true;
+    loaded = true;
     $('#dr-table').innerHTML = '<div class="skeleton">Reading drivers…</div>';
-    const r = await hw.drivers();
-    if (!r.ok) { $('#dr-sub').textContent = "Windows didn't return the driver list. Try again in a moment."; state.loaded.drivers = false; return; }
+    let r;
+    try { r = await hw.drivers(); } catch (e) {
+      $('#dr-sub').textContent = e.message;
+      $('#dr-table').innerHTML = '';
+      loaded = false;
+      return;
+    }
     all = r.drivers;
-    const old = all.filter((d) => !isMs(d) && fmt.age(d.date).years >= 3);
-    $('#dr-sub').textContent = `${all.length} drivers installed, ${all.filter((d) => !isMs(d)).length} of them from hardware makers. ${old.length ? `${old.length} are more than three years old.` : 'None of the hardware makers’ drivers are more than three years old.'}`;
+    const vendor = all.filter((d) => !R.isMicrosoftDriver(d));
+    const old = all.filter((d) => R.isOldDriver(d));
+    $('#dr-sub').textContent = `${all.length} drivers installed, ${vendor.length} of them from hardware makers. ${old.length ? `${old.length} are more than three years old.` : 'None of the hardware makers’ drivers are more than three years old.'}`;
 
     let html = '';
     if (r.problems.length) {
@@ -632,18 +621,12 @@ const driversView = (() => {
     } else {
       html += `<div class="dr-callout"><span class="st good">${ICON.good}</span><div><h3>All devices are working</h3><span class="muted">Windows reports no driver errors.</span></div></div>`;
     }
-    const key = [
-      ...all.filter((d) => d.cls === 'DISPLAY' && !/virtual|remote|basic display|indirect/i.test(d.name)),
-      ...all.filter((d) => d.cls === 'NET' && !isMs(d) && /wi-?fi|wireless|ethernet|killer|realtek|gbe|lan/i.test(d.name)),
-      ...all.filter((d) => d.cls === 'MEDIA' && !isMs(d) && !/virtual|nvidia|hdmi|displayport|steam streaming|voicemod|vb-audio/i.test(d.name)).slice(0, 1),
-      ...all.filter((d) => d.cls === 'BLUETOOTH' && !isMs(d)).slice(0, 1),
-    ];
-    html += `<div class="key-drivers">${key.map((d) => {
+    html += `<div class="key-drivers">${R.keyDrivers(all).map((d) => {
       const a = fmt.age(d.date);
-      const [link, label] = vendorLink(d);
+      const link = R.driverLink(d);
       return `<div class="kd"><div class="k">${clsName(d.cls)}</div><div class="n" title="${fmt.esc(d.name)}">${fmt.esc(d.name)}</div>
-        <div class="v">${fmt.esc(d.version)}</div><div class="d ${a.years >= 3 ? 'age-old' : ''}">${fmt.esc(a.text)}${a.rel ? `, ${a.rel}` : ''}</div>
-        <button class="link" data-link="${link}">${label}</button></div>`;
+        <div class="v">${fmt.esc(d.version)}</div><div class="d ${R.isOldDriver(d) ? 'age-old' : ''}">${fmt.esc(a.text)}${a.rel ? `, ${a.rel}` : ''}</div>
+        <button class="link" data-link="${link.key}">${link.label}</button></div>`;
     }).join('')}</div>`;
     $('#dr-highlights').innerHTML = html;
 
@@ -657,33 +640,33 @@ const driversView = (() => {
     const cls = $('#dr-class').value;
     const hideMs = $('#dr-hide-ms').checked;
     const rows = all
-      .filter((d) => (!cls || d.cls === cls) && (!hideMs || !isMs(d)))
+      .filter((d) => (!cls || d.cls === cls) && (!hideMs || !R.isMicrosoftDriver(d)))
       .filter((d) => !q || `${d.name} ${d.provider} ${d.maker} ${d.version}`.toLowerCase().includes(q))
       .sort((a, b) => clsName(a.cls).localeCompare(clsName(b.cls)) || a.name.localeCompare(b.name));
     $('#dr-table').innerHTML = `<div class="ft-row drv-row head-row"><span>Device</span><span>Type</span><span>Driver from</span><span>Version</span><span>Date</span></div>` +
       (rows.length ? rows.map((d) => {
         const a = fmt.age(d.date);
-        const old = !isMs(d) && a.years >= 3;
         return `<div class="ft-row drv-row"><div class="path"><b title="${fmt.esc(d.name)}">${fmt.esc(d.name)}</b></div>
           <span style="color:var(--muted)">${fmt.esc(clsName(d.cls))}</span>
           <span style="color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${fmt.esc(d.provider || d.maker)}</span>
           <span class="num">${fmt.esc(d.version)}</span>
-          <span class="num ${old ? 'age-old' : 'age-ok'}" title="${fmt.esc(a.rel || '')}">${fmt.esc(a.text)}</span></div>`;
+          <span class="num ${R.isOldDriver(d) ? 'age-old' : 'age-ok'}" title="${fmt.esc(a.rel || '')}">${fmt.esc(a.text)}</span></div>`;
       }).join('') : '<div class="skeleton">No drivers match your search.</div>');
   }
   $('#dr-search').addEventListener('input', renderTable);
   $('#dr-class').addEventListener('change', renderTable);
   $('#dr-hide-ms').addEventListener('change', renderTable);
-  return { load };
+  return { enter() { if (!loaded) load(); } };
 })();
 
 // ---------- Internet ----------
-const networkView = (() => {
+views.network = (() => {
   const HKEY = 'hd.speedHistory';
   const readHistory = () => { try { return JSON.parse(localStorage.getItem(HKEY)) || []; } catch { return []; } };
   const writeHistory = (h) => { try { localStorage.setItem(HKEY, JSON.stringify(h.slice(0, 12))); } catch { /* storage unavailable */ } };
   let running = false;
 
+  // Speed test results are in bits per second.
   function verdict(down) {
     const m = down / 1e6;
     if (m < 10) return 'Enough for browsing and HD video on one device. Large downloads will be slow.';
@@ -694,8 +677,9 @@ const networkView = (() => {
 
   async function enter() {
     renderHistory();
-    const n = await hw.netInfo();
-    const main = n.interfaces.find((i) => i.isDefault) || n.interfaces.find((i) => i.up);
+    const n = await attempt(() => hw.netInfo());
+    if (!n) return;
+    const main = n.interfaces.find((i) => i.name === n.main);
     const wifi = n.wifi[0];
     const st = n.status;
     $('#net-sub').textContent = !st.online
@@ -703,21 +687,20 @@ const networkView = (() => {
       : !st.dns
         ? "Connected, but websites can't be looked up (DNS isn't answering). Try restarting your router."
         : `Online${wifi ? ` through Wi-Fi network “${wifi.ssid}”` : main ? ` through ${main.name}` : ''}. ${Math.round(st.latency)} ms to the internet.`;
-    const dnsList = [...new Set(n.dns.filter((d) => !main || d.iface === main.name || n.dns.length === 1).flatMap((d) => d.servers))];
     const rows = [
       ['Status', st.online ? 'Online' : 'Offline'],
       ['Response time', st.latency != null ? `${Math.round(st.latency)} ms` : '–'],
-      ...(wifi ? [['Wi-Fi network', wifi.ssid], ['Signal', `${wifi.signal}%${wifi.frequency ? `, ${(wifi.frequency / 1000).toFixed(1)} GHz` : ''}`], ['Security', wifi.security || '–']] : []),
+      ...(wifi ? [['Wi-Fi network', wifi.ssid], ['Signal', `${wifi.quality}%${wifi.frequency ? `, ${(wifi.frequency / 1000).toFixed(1)} GHz` : ''}`], ['Security', wifi.security || '–']] : []),
       ['Your local address', main ? main.ip4 || '–' : '–'],
       ['Router', n.gateway || '–'],
-      ['DNS servers', (dnsList.length ? dnsList : n.dns.flatMap((d) => d.servers)).slice(0, 4).join(', ') || '–'],
+      ['DNS servers', n.dnsMain.slice(0, 4).join(', ') || '–'],
     ];
     $('#net-conn').innerHTML = rows.map(([k, v]) => `<dt>${fmt.esc(k)}</dt><dd>${fmt.esc(v)}</dd>`).join('');
     const ifs = n.interfaces.filter((i) => i.up || !i.virtual);
     $('#net-ifaces').innerHTML = ifs.map((i) => `<div class="iface">
       <div class="row-between"><b title="${fmt.esc(i.name)}">${fmt.esc(i.name)}</b>
       <span class="pills">${i.isDefault ? '<span class="pill main">In use</span>' : ''}<span class="pill ${i.up ? 'on' : 'off'}">${i.up ? 'Connected' : 'Not connected'}</span></span></div>
-      <small>${[i.type === 'wireless' ? 'Wi-Fi' : /ethernet|gbe|\blan\b/i.test(i.name) ? 'Cable' : '', i.virtual || /tailscale|vpn|tunnel|virtual|hyper-v/i.test(i.name) ? 'Virtual' : '', i.speed ? `link speed ${i.speed >= 1000 ? (i.speed / 1000).toFixed(1) + ' Gbit/s' : i.speed + ' Mbit/s'}` : '', i.ip4].filter(Boolean).map(fmt.esc).join(', ')}</small></div>`).join('');
+      <small>${[i.medium, i.virtual ? 'Virtual' : '', i.speed ? `link speed ${i.speed >= 1000 ? (i.speed / 1000).toFixed(1) + ' Gbit/s' : i.speed + ' Mbit/s'}` : '', i.ip4].filter(Boolean).map(fmt.esc).join(', ')}</small></div>`).join('');
   }
 
   function renderHistory() {
@@ -733,7 +716,6 @@ const networkView = (() => {
     $('#sg-bar').style.width = `${(p.progress || 0) * 100}%`;
     if (p.phase === 'ping' && p.ping != null) { $('#sr-ping').textContent = `${Math.round(p.ping)} ms`; $('#sr-jitter').textContent = `${p.jitter.toFixed(1)} ms`; }
     if (p.bps != null) { $('#sg-value').textContent = fmt.bps(p.bps); $('#sg-value').classList.remove('idle'); }
-    if (p.phase === 'upload' && p.bps != null && $('#sr-down').dataset.locked !== '1') $('#sr-down').dataset.locked = '1';
   });
 
   $('#speed-start').addEventListener('click', async () => {
@@ -741,16 +723,15 @@ const networkView = (() => {
     running = true;
     const b = $('#speed-start');
     b.disabled = true; b.textContent = 'Testing…';
-    ['#sr-down', '#sr-up', '#sr-ping', '#sr-jitter'].forEach((s) => { $(s).textContent = '–'; delete $(s).dataset.locked; });
+    ['#sr-down', '#sr-up', '#sr-ping', '#sr-jitter'].forEach((s) => { $(s).textContent = '–'; });
     $('#sg-value').textContent = '0';
     $('#sg-value').classList.add('idle');
-    const r = await hw.speedTest();
+    const x = await attempt(() => hw.speedTest());
     running = false;
     b.disabled = false; b.textContent = 'Test again';
     $('#sg-bar').style.width = '0';
-    if (!r.ok) { $('#sg-label').textContent = 'Download'; return toast(r.error, true); }
-    const x = r.result;
     $('#sg-label').textContent = 'Download';
+    if (!x) return;
     $('#sg-value').textContent = fmt.bps(x.download);
     $('#sg-value').classList.remove('idle');
     $('#sr-down').textContent = `${fmt.bps(x.download)} Mbit/s`;
@@ -766,47 +747,41 @@ const networkView = (() => {
 })();
 
 // ---------- Health check ----------
-const healthView = (() => {
-  const PARTS = [
-    { id: 'cpu', name: 'Processor and stability', desc: 'Load, temperature, hardware errors, crashes and unexpected shutdowns' },
-    { id: 'memory', name: 'Memory', desc: 'Usage, overflow memory, modules and the Windows memory test' },
-    { id: 'gpu', name: 'Graphics', desc: 'Temperature, video memory, performance limits, driver age and crashes' },
-    { id: 'storage', name: 'Storage', desc: 'Drive health, SSD wear, free space, disk errors and TRIM' },
-    { id: 'battery', name: 'Battery', desc: 'Capacity left compared with new, charging and battery care' },
-    { id: 'network', name: 'Internet', desc: 'Connection, name lookup, response time, stability and Wi-Fi signal' },
-    { id: 'bluetooth', name: 'Bluetooth', desc: 'Adapter, radio, service, device problems and low batteries' },
-    { id: 'drivers', name: 'Drivers', desc: 'Devices with problems, outdated drivers and unsigned drivers' },
-  ];
-  const ICONS = { cpu: ICON.cpu, memory: ICON.memory, gpu: ICON.gpu, storage: ICON.storage, battery: ICON.battery, network: ICON.network, bluetooth: ICON.bluetooth, drivers: ICON.drivers };
+views.health = (() => {
+  let parts = []; // [{ id, name, desc }] from the main process; the battery check only appears on PCs with one
   const KEY = 'hd.health';
   const results = (() => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } })();
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(results)); } catch { /* storage unavailable */ } };
   const running = new Set();
   const queued = new Set();
   const open = new Set();
-  const CHIP = { good: 'Healthy', warn: 'Worth a look', bad: 'Needs attention' };
+  const CHIP = { good: 'Healthy', warn: 'Worth a look', bad: 'Needs attention', info: 'Nothing to judge', error: 'Couldn’t finish' };
 
-  const parts = () => PARTS.filter((p) => p.id !== 'battery' || !state.static || state.static.hasBattery);
-
+  // An action button speaks the page's shared action attributes (see the document click handler).
+  function actionButton(a) {
+    const attr = { tool: `data-tool="${fmt.esc(a.key)}"`, link: `data-link="${fmt.esc(a.key)}"`, goto: `data-goto="${fmt.esc(a.key)}"`, admin: 'data-admin', 'battery-report': 'data-battery-report' }[a.type];
+    return attr ? `<button class="btn small" ${attr}>${fmt.esc(a.label)}</button>` : '';
+  }
   function finding(f) {
-    const act = f.action ? `<button class="btn small" data-act="${f.action.type}" data-key="${fmt.esc(f.action.key || '')}">${fmt.esc(f.action.label)}</button>` : '';
     return `<div class="hc-finding"><span class="st ${f.status}">${ICON[f.status]}</span><div>
-      <b>${fmt.esc(f.label)}</b><p>${fmt.esc(f.detail)}</p>${f.fix ? `<p class="fix">${fmt.esc(f.fix)}</p>` : ''}${act}</div></div>`;
+      <b>${fmt.esc(f.label)}</b><p>${fmt.esc(f.detail)}</p>${f.fix ? `<p class="fix">${fmt.esc(f.fix)}</p>` : ''}${f.action ? actionButton(f.action) : ''}</div></div>`;
   }
 
   function render() {
-    $('#hc-list').innerHTML = parts().map((p) => {
+    $('#hc-list').innerHTML = parts.map((p) => {
       const r = results[p.id];
       const isRun = running.has(p.id), isQ = queued.has(p.id);
       const chip = isRun ? '<span class="chip running">Checking…</span>'
         : isQ ? '<span class="chip">Waiting</span>'
         : r ? `<span class="chip ${r.status}">${CHIP[r.status]}</span>` : '<span class="chip">Not checked</span>';
-      const counts = r ? ['bad', 'warn'].map((s) => r.items.filter((i) => i.status === s).length) : [0, 0];
-      const desc = r && !isRun ? `${counts[0] + counts[1] ? `${counts[0] + counts[1]} of ${r.items.length} findings need a look. ` : `All ${r.items.length} checks passed. `}Checked ${fmt.ago(r.at)}.` : p.desc;
+      const flagged = r ? r.items.filter((i) => i.status === 'bad' || i.status === 'warn').length : 0;
+      const desc = r && !isRun
+        ? `${r.status === 'error' ? 'The check could not finish. ' : flagged ? `${flagged} of ${r.items.length} findings need a look. ` : r.status === 'good' ? `All ${r.items.length} checks passed. ` : ''}Checked ${fmt.ago(r.at)}.`
+        : p.desc;
       const expanded = open.has(p.id) && r && !isRun;
       return `<div class="hc-item">
         <div class="hc-row">
-          <span class="hc-icon">${ICONS[p.id]}</span>
+          <span class="hc-icon">${ICON[p.id]}</span>
           <div><h3>${fmt.esc(p.name)}</h3><p>${fmt.esc(desc)}</p></div>
           ${chip}
           <div style="display:flex;gap:6px">
@@ -821,29 +796,30 @@ const healthView = (() => {
     updateChip();
   }
 
+  const counts = () => {
+    const list = parts.map((p) => results[p.id]).filter(Boolean);
+    const n = (s) => list.filter((r) => r.status === s).length;
+    return { list, bad: n('bad'), warn: n('warn'), good: n('good'), unjudged: n('info') + n('error') };
+  };
+
   function renderSummary() {
-    const list = parts().map((p) => results[p.id]).filter(Boolean);
+    const { list, bad, warn, good, unjudged } = counts();
     const el = $('#hc-summary');
     if (!list.length) { el.hidden = true; return; }
     el.hidden = false;
-    const bad = list.filter((r) => r.status === 'bad').length;
-    const warn = list.filter((r) => r.status === 'warn').length;
-    const good = list.length - bad - warn;
-    const missing = parts().length - list.length;
+    const missing = parts.length - list.length;
     const total = list.length;
     // Ring: share of healthy parts.
-    const C = 2 * Math.PI * 22;
-    const seg = (n, off, color) => `<circle cx="27" cy="27" r="22" fill="none" stroke="${color}" stroke-width="6" stroke-dasharray="${(n / total) * C} ${C}" stroke-dashoffset="${-off * C / total}" transform="rotate(-90 27 27)"/>`;
+    const CIRC = 2 * Math.PI * 22;
+    const seg = (n, off, color) => `<circle cx="27" cy="27" r="22" fill="none" stroke="${color}" stroke-width="6" stroke-dasharray="${(n / total) * CIRC} ${CIRC}" stroke-dashoffset="${-off * CIRC / total}" transform="rotate(-90 27 27)"/>`;
     const ring = `<svg class="ring" viewBox="0 0 54 54"><circle cx="27" cy="27" r="22" fill="none" stroke="var(--line)" stroke-width="6"/>${seg(good, 0, 'var(--ok)')}${seg(warn, good, 'var(--amber)')}${seg(bad, good + warn, 'var(--hot)')}</svg>`;
-    const head = bad ? `${bad} part${bad > 1 ? 's need' : ' needs'} attention` : warn ? `${warn} part${warn > 1 ? 's are' : ' is'} worth a look` : 'Your PC is in good shape';
-    el.innerHTML = `${ring}<div><strong>${head}</strong><span>${good} of ${total} checked parts are healthy.${missing ? ` ${missing} not checked yet.` : ''} Open a part below to see what was found and what to do.</span></div>`;
+    const head = bad ? `${bad} part${bad > 1 ? 's need' : ' needs'} attention` : warn ? `${warn} part${warn > 1 ? 's are' : ' is'} worth a look` : good ? 'Your PC is in good shape' : 'Nothing could be judged yet';
+    el.innerHTML = `${ring}<div><strong>${head}</strong><span>${good} of ${total} checked parts are healthy.${unjudged ? ` ${unjudged} couldn't be judged.` : ''}${missing ? ` ${missing} not checked yet.` : ''} Open a part below to see what was found and what to do.</span></div>`;
   }
 
   function updateChip() {
     const chip = $('#health-chip');
-    const list = parts().map((p) => results[p.id]).filter(Boolean);
-    const bad = list.filter((r) => r.status === 'bad').length;
-    const warn = list.filter((r) => r.status === 'warn').length;
+    const { list, bad, warn } = counts();
     let cls = 'idle', text = 'Run a health check';
     if (running.size || queued.size) { cls = 'running'; text = 'Checking your PC…'; }
     else if (list.length) {
@@ -863,14 +839,14 @@ const healthView = (() => {
     running.add(id);
     open.add(id);
     render();
-    const r = await hw.healthRun(id);
+    const r = await attempt(() => hw.healthRun(id));
     running.delete(id);
     if (r) { results[id] = r; save(); }
     render();
   }
 
   async function runAll() {
-    const ids = parts().map((p) => p.id).filter((id) => !running.has(id));
+    const ids = parts.map((p) => p.id).filter((id) => !running.has(id));
     ids.forEach((id) => queued.add(id));
     render();
     // Two at a time keeps the PC responsive while the checks read event logs.
@@ -883,27 +859,18 @@ const healthView = (() => {
   }
 
   $('#hc-all').addEventListener('click', runAll);
-  $('#hc-list').addEventListener('click', async (e) => {
+  $('#hc-list').addEventListener('click', (e) => {
     const r = e.target.closest('[data-run]'); if (r) return run(r.dataset.run);
     const t = e.target.closest('[data-toggle]');
-    if (t) { open.has(t.dataset.toggle) ? open.delete(t.dataset.toggle) : open.add(t.dataset.toggle); return render(); }
-    const a = e.target.closest('[data-act]');
-    if (a) {
-      const { act, key } = a.dataset;
-      if (act === 'tool') hw.openTool(key);
-      else if (act === 'link') hw.openLink(key);
-      else if (act === 'goto') show(key);
-      else if (act === 'admin') { if (!(await hw.relaunchAdmin())) toast('Restart as administrator was cancelled.', true); }
-      else if (act === 'battery-report') { const x = await hw.batteryReport(); if (!x.ok) toast(x.error, true); }
-    }
+    if (t) { open.has(t.dataset.toggle) ? open.delete(t.dataset.toggle) : open.add(t.dataset.toggle); render(); }
   });
 
-  render();
-  return { run, runAll, render };
+  hw.healthChecks().then((list) => { parts = list; render(); }, (e) => console.error(e));
+  return { run, runAll, busy: () => running.size + queued.size > 0 };
 })();
 
 // ---------- Bluetooth ----------
-const bluetoothView = (() => {
+views.bluetooth = (() => {
   let timer = null;
   const KIND = { audio: 'Headphones or speaker', keyboard: 'Keyboard', mouse: 'Mouse', controller: 'Game controller', phone: 'Phone', wearable: 'Watch or wearable', other: 'Bluetooth device' };
 
@@ -916,21 +883,25 @@ const bluetoothView = (() => {
     </div>`;
   }
 
-  async function refresh(force) {
-    const b = await hw.bluetooth(force);
-    if (!b.ok || !b.adapters.length) {
-      $('#bt-sub').textContent = 'No Bluetooth adapter was found on this PC.';
-      $('#bt-adapter').innerHTML = '<div class="bt-empty">If your PC has Bluetooth, it may be switched off in the BIOS or missing a driver. Check Device Manager.</div>';
-      $('#bt-connected').innerHTML = ''; $('#bt-paired').innerHTML = '';
-      return;
-    }
+  function empty(sub, hint) {
+    $('#bt-sub').textContent = sub;
+    $('#bt-adapter').innerHTML = `<div class="bt-empty">${fmt.esc(hint)}</div>`;
+    $('#bt-connected').innerHTML = ''; $('#bt-paired').innerHTML = '';
+  }
+
+  async function refresh() {
+    let b;
+    try { b = await hw.bluetooth(true); } catch (e) { return empty(e.message, 'Windows may still be starting its Bluetooth service.'); }
+    if (!b.adapters.length) return empty('No Bluetooth adapter was found on this PC.', 'If your PC has Bluetooth, it may be switched off in the BIOS or missing a driver. Check Device Manager.');
     const a = b.adapters[0];
     const conn = b.devices.filter((d) => d.connected);
     const paired = b.devices.filter((d) => !d.connected);
-    const on = b.radio !== 'Off';
-    $('#bt-sub').textContent = !on
-      ? 'Bluetooth is turned off. Turn it on in Bluetooth settings to use your devices.'
-      : `Bluetooth is on. ${conn.length ? `${conn.length} device${conn.length > 1 ? 's' : ''} connected` : 'Nothing connected right now'}, ${b.devices.length} paired in total.`;
+    const on = !radioOff(b.radio);
+    $('#bt-sub').textContent = b.radio === 'disabled'
+      ? 'The Bluetooth radio is disabled. A hardware switch, flight mode or a policy may have turned it off.'
+      : !on
+        ? 'Bluetooth is turned off. Turn it on in Bluetooth settings to use your devices.'
+        : `Bluetooth is on. ${conn.length ? `${conn.length} device${conn.length > 1 ? 's' : ''} connected` : 'Nothing connected right now'}, ${b.devices.length} paired in total.`;
     const age = fmt.age(a.date);
     $('#bt-adapter').innerHTML = `
       <span class="bt-logo ${on ? '' : 'off'}">${ICON.bluetooth}</span>
@@ -942,13 +913,19 @@ const bluetoothView = (() => {
     $('#bt-paired').innerHTML = paired.length ? paired.map(card).join('') : '<div class="bt-empty">Every paired device is connected.</div>';
   }
 
-  function setActive(on) {
-    clearInterval(timer);
-    timer = null;
-    if (on) { refresh(true); timer = setInterval(() => refresh(true), 10000); }
-  }
-  return { setActive };
+  return {
+    enter() { refresh(); timer = setInterval(refresh, 10000); },
+    leave() { clearInterval(timer); timer = null; },
+  };
 })();
 
-overview.start();
-hw.staticInfo().then(() => healthView.render());
+views.overview.start();
+
+// A deliberately small handle for HD_CAPTURE screenshots (main.js) and the DevTools console.
+window.hd = {
+  show,
+  scan: (folder) => bus.emit('scan', folder),
+  scanRunning: () => state.scan.running,
+  checkHealth: () => views.health.runAll(),
+  healthRunning: () => views.health.busy(),
+};

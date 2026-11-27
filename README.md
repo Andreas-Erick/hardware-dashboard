@@ -35,7 +35,7 @@ Requires Node.js 20 or newer. The logo lives in `renderer/logo.svg`; rebuild the
 ## Safety
 
 - Nothing is deleted unless you confirm it.
-- Items from the disk map go to the **Recycle Bin**, so you can restore them. Windows, Program Files, ProgramData, your user folder itself and drive roots are refused.
+- Items from the disk map go to the **Recycle Bin**, so you can restore them. Windows, Program Files, ProgramData, your user folder itself and drive roots are refused, and nothing can be removed while a scan is still running.
 - "Clean up" can only empty a fixed list of cache folders. Temp files newer than 24 hours and files in use are skipped.
 
 ## Good to know
@@ -48,13 +48,23 @@ Requires Node.js 20 or newer. The logo lives in `renderer/logo.svg`; rebuild the
 ## Project layout
 
 ```
-main.js              Electron main process, IPC, safety checks
-preload.js           The small API the page is allowed to use (window.hw)
-src/monitor.js       CPU, RAM, GPU, drives, temperatures, battery
-src/drivers.js       Installed drivers and problem devices (via PowerShell/CIM)
-src/network.js       Connection info and the speed test
-src/cleanup.js       Cleanup locations, measuring and clearing
-src/scanner*.js      Background disk scan (worker thread) and queries
-renderer/            The interface (HTML, CSS, plain JavaScript)
-scripts/smoke-test.js  `npm run check`: exercises the data layer without the UI
+main.js                  Electron main process: declares everything the window can ask for
+preload.js               Builds window.hw from the contract main.js publishes
+src/ipc.js               That contract: one envelope, every method and event declared once
+src/shell.js             Runs PowerShell and Windows tools; typed failures, JSON quirks handled once
+src/monitor.js           CPU, RAM, GPU, drives, temperatures, battery
+src/drivers.js           Installed drivers and problem devices (via PowerShell/CIM)
+src/network.js           Connection info and the speed test (src/net-probe.js: TCP ping, latency stats)
+src/bluetooth.js(.ps1)   Bluetooth adapter, radio and paired devices
+src/cleanup.js           Clean up items: each one measures and clears itself
+src/fs-walk.js           Folder walk shared by the disk scan and Clean up
+src/scan/                Disk scan: index.js (the module), tree.js (pure), engine.js, worker/in-process adapters,
+                         trash-guard.js (Recycle Bin safety rails)
+src/health/              Health check: probes.js (facts from Windows) + rules.js (facts → findings)
+shared/                  Rules the page and the main process share: file categories, temperature and driver rules
+renderer/                The interface (HTML, CSS, plain JavaScript); each page is a view with enter()/leave()
+test/                    `npm test`: behaviour tests with an in-memory filesystem and recorded Windows output
+scripts/smoke-test.js    `npm run check`: runs the data layer against this PC and reports each step
 ```
+
+See [GLOSSARY.md](GLOSSARY.md) for the words the code and the interface use.
