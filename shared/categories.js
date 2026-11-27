@@ -1,4 +1,4 @@
-/* File categories used to colour the disk map. Shared by the page (global HD_CATS) and the scan worker (require). */
+/* File categories used to colour the disk map. Loaded by the page (global HD_CATS) and by the scan (require). */
 (function (root) {
   const CATS = {
     video: { label: 'Video', color: '#e9a65c', ext: 'mp4 mkv mov avi wmv webm m4v mpg mpeg ts m2ts flv 3gp vob' },
@@ -11,13 +11,21 @@
     dev: { label: 'Code and databases', color: '#b7c2cc', ext: 'js ts json py java c cpp h cs go rs db sqlite mdb log xml yml yaml lock map node' },
     other: { label: 'Other files', color: '#7d92a2', ext: '' },
   };
+  const NO_EXT = '(none)';
   const extToCat = {};
   for (const [k, v] of Object.entries(CATS)) for (const e of v.ext.split(' ')) if (e) extToCat['.' + e] = k;
-  function category(name) {
+
+  /** Lower-case extension including the dot, or '(none)'. Dotfiles and very long "extensions" count as none. */
+  function extOf(name) {
     const i = name.lastIndexOf('.');
-    return (i > 0 && extToCat[name.slice(i).toLowerCase()]) || 'other';
+    if (i <= 0 || i === name.length - 1) return NO_EXT;
+    const e = name.slice(i).toLowerCase();
+    return e.length <= 12 ? e : NO_EXT;
   }
-  const api = { CATS, extToCat, category };
+  const categoryOfExt = (ext) => extToCat[ext] || 'other';
+  const category = (name) => categoryOfExt(extOf(name));
+
+  const api = { CATS, NO_EXT, extOf, categoryOfExt, category };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.HD_CATS = api;
 })(this);

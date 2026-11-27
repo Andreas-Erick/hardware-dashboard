@@ -227,6 +227,8 @@ h3 { font: 600 15px/1.2 var(--display); margin: 0 0 10px; color: var(--muted); }
 .chip.warn { background: rgba(244,184,96,0.13); color: var(--amber); }
 .chip.bad { background: rgba(238,123,98,0.14); color: var(--hot); }
 .chip.running { background: rgba(134,200,230,0.12); color: var(--ice); }
+.chip.error { background: rgba(244,184,96,0.08); color: var(--muted); border: 1px dashed var(--amber); }
+.chip.info { background: var(--line); color: var(--muted); }
 .chip.running::before { animation: blink 1s ease-in-out infinite; }
 .hc-results { border-top: 1px solid var(--line); padding: 4px 18px 14px 78px; }
 .hc-finding { display: grid; grid-template-columns: 22px minmax(0,1fr); gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line); }
