@@ -159,3 +159,48 @@ test('starting a scan of a folder that does not exist fails with a readable mess
   assert.throws(() => scan.start('C:\\nope'), /doesn't exist/);
   assert.throws(() => scan.start('relative\\path'), /doesn't exist/);
 });
+
+test('at the root of a drive, gaps under 1% are not reported and finding over 3% more than Windows is overcounting', async () => {
+  const GB = 1024 ** 3;
+  const atRoot = async (found, used) => {
+    const { scan } = makeScan({ tree: { 'D:\\': { 'game.pak': found * GB } }, getDrives: async () => [{ mount: 'D:', size: 500 * GB, used: used * GB }] });
+    await scanned(scan, 'D:\\');
+    const data = await scan.children('D:\\');
+    scan.stop();
+    return [data.unreadable / GB, data.overcounted];
+  };
+  assert.deepEqual(await atRoot(96, 100), [0, false], '4 GB missing is under 1% of a 500 GB drive');
+  assert.deepEqual(await atRoot(94, 100), [6, false]);
+  assert.deepEqual(await atRoot(103, 100), [0, false], 'up to 3% over is rounding and hard links');
+  assert.deepEqual(await atRoot(104, 100), [0, true]);
+});
+
+test('a folder is "mostly" a category from 40% of its size, and never "mostly other"', () => {
+  const folder = (files) => {
+    const t = createScanTree('C:\\d');
+    const dir = t.addDir(t.root, 'f');
+    for (const [name, size] of Object.entries(files)) t.addFile(dir, name, size);
+    return t.children('C:\\d').items[0].mostly;
+  };
+  assert.equal(folder({ 'a.mp4': 40, 'b.pdf': 30, 'c.zip': 30 }), 'video');
+  assert.equal(folder({ 'a.mp4': 39, 'b.pdf': 31, 'c.zip': 30 }), null);
+  assert.equal(folder({ 'a.xyz': 90, 'b.pdf': 10 }), null, 'unknown files are not a category');
+});
+
+test('a cancelled scan finishes early and says it was cancelled', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const mem = memFs(TREE);
+  // Subfolders wait until the cancel has been handled, so the scan can't finish first.
+  const slowFs = { list: async (d) => { if (d !== 'C:\\data') await gate; return mem.list(d); }, size: mem.size };
+  const { scan } = makeScan({ spawn: inProcessSpawn({ fs: slowFs }) });
+  const done = scanned(scan);
+  scan.cancel();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  release();
+  const stats = await done;
+  assert.equal(stats.cancelled, true);
+  assert.equal(stats.files, 3, 'only the files next to the scanned folder were measured');
+  scan.stop();
+});
