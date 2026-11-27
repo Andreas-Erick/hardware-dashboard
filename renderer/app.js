@@ -58,12 +58,21 @@ const bus = (() => {
   };
 })();
 
+/** Plays el's exit animation (started by adding cls), then calls done. The timer covers a missed animationend. */
+function playExit(el, cls, done) {
+  let finished = false;
+  const end = () => { if (finished) return; finished = true; el.classList.remove(cls); done(); };
+  el.addEventListener('animationend', end, { once: true });
+  el.classList.add(cls);
+  setTimeout(end, 300);
+}
+
 function toast(msg, err = false) {
   const t = document.createElement('div');
   t.className = `toast${err ? ' err' : ''}`;
   t.textContent = msg;
   $('#toasts').appendChild(t);
-  setTimeout(() => t.remove(), err ? 7000 : 4500);
+  setTimeout(() => playExit(t, 'leaving', () => t.remove()), err ? 7000 : 4500);
 }
 /** Run an hw call; on failure show its message and resolve undefined. */
 async function attempt(fn) {
@@ -99,28 +108,60 @@ document.addEventListener('click', (e) => {
   else if ('batteryReport' in d) attempt(() => hw.batteryReport());
 });
 
+let modalSeq = 0;
 function confirmModal({ title, body, ok = 'OK', danger = true }) {
   return new Promise((resolve) => {
     const m = $('#modal');
     $('#modal-title').textContent = title;
     $('#modal-body').innerHTML = body;
     const okBtn = $('#modal-ok');
+    const cancelBtn = $('#modal-cancel');
+    const back = document.activeElement;
+    const token = ++modalSeq; // a modal opened while the last one is still fading out keeps it from hiding this one
     okBtn.textContent = ok;
     okBtn.className = `btn ${danger ? 'danger' : 'primary'}`;
+    m.classList.remove('closing');
     m.hidden = false;
-    $('#modal-cancel').focus();
-    const done = (v) => { m.hidden = true; document.removeEventListener('keydown', key); okBtn.onclick = null; $('#modal-cancel').onclick = null; resolve(v); };
-    const key = (e) => { if (e.key === 'Escape') done(false); };
+    cancelBtn.focus();
+    const done = (v) => {
+      document.removeEventListener('keydown', key);
+      okBtn.onclick = null; cancelBtn.onclick = null; m.onclick = null;
+      resolve(v);
+      playExit(m, 'closing', () => {
+        if (token !== modalSeq) return;
+        m.hidden = true;
+        if (back && back.isConnected) back.focus();
+      });
+    };
+    // Escape cancels; Tab stays on the two buttons so focus can't wander to the page behind.
+    const key = (e) => {
+      if (e.key === 'Escape') done(false);
+      else if (e.key === 'Tab') { e.preventDefault(); (document.activeElement === okBtn ? cancelBtn : okBtn).focus(); }
+    };
     document.addEventListener('keydown', key);
     okBtn.onclick = () => done(true);
-    $('#modal-cancel').onclick = () => done(false);
+    cancelBtn.onclick = () => done(false);
+    m.onclick = (e) => { if (e.target === m) done(false); };
   });
 }
 
+/**
+ * Calls fn every ms while the window can be seen, and once more as soon as it is shown again.
+ * A minimised or hidden window starts no PowerShell, pings or redraws. Returns a function that stops it.
+ */
+function whileVisible(ms, fn) {
+  const run = () => { if (!document.hidden) fn(); };
+  const id = setInterval(run, ms);
+  document.addEventListener('visibilitychange', run);
+  return () => { clearInterval(id); document.removeEventListener('visibilitychange', run); };
+}
+
 const meterClass = (p) => (p >= 90 ? 'full' : p >= 75 ? 'warn' : '');
+/** A meter fill's --p: the share as 0..1. The CSS scales the fill with it, so updates never cause a layout. */
+const fill = (p) => `--p:${Math.max(0, Math.min(100, p || 0)) / 100}`;
 function setMeter(el, p) {
   el.className = `meter ${meterClass(p)}`;
-  el.firstElementChild.style.width = `${Math.max(0, Math.min(100, p))}%`;
+  el.firstElementChild.style.cssText = fill(p);
 }
 
 // ---------- Overview ----------
@@ -162,7 +203,7 @@ views.overview = (() => {
       cpu.meta.textContent = `${s ? s.cpu.brand.replace(/\(R\)|\(TM\)|™|®/g, '') : ''}${l.cpu.speed ? `, ${l.cpu.speed.toFixed(2)} GHz` : ''}`;
       sparks.cpu.push(l.cpu.load);
       const bars = cpu.cores.children;
-      l.cpu.cores.forEach((v, i) => bars[i] && bars[i].style.setProperty('--h', `${v}%`));
+      l.cpu.cores.forEach((v, i) => bars[i] && bars[i].style.setProperty('--h', Math.max(0, Math.min(100, v)) / 100));
       cpu.el.classList.toggle('hot', l.cpu.load >= 90);
     }
     if (l.mem) {
@@ -203,7 +244,7 @@ views.overview = (() => {
     const set = (k, pct, txt) => {
       $(`[data-sl="${k}"]`).textContent = txt;
       const b = $(`[data-slb="${k}"]`);
-      b.style.width = `${Math.max(0, Math.min(100, pct || 0))}%`;
+      b.style.cssText = fill(pct);
       b.className = meterClass(pct || 0);
     };
     if (l.cpu) set('cpu', l.cpu.load, `${Math.round(l.cpu.load)}%`);
@@ -255,7 +296,7 @@ views.overview = (() => {
     $('#ov-drives').innerHTML = drives.map((d) => {
       const p = (d.used / d.size) * 100;
       return `<div class="drive"><div class="row-between"><strong>${fmt.esc(d.mount)}</strong><span>${fmt.bytes(d.free)} free</span></div>
-        <div class="meter ${meterClass(p)}"><i style="width:${p}%"></i></div>
+        <div class="meter ${meterClass(p)}"><i style="${fill(p)}"></i></div>
         <small>${fmt.bytes(d.used)} used of ${fmt.bytes(d.size)}</small></div>`;
     }).join('');
   }
@@ -273,11 +314,13 @@ views.overview = (() => {
     hw.isAdmin().then((a) => (state.admin = a), () => {});
     tick();
     hw.staticInfo().then((s) => { state.static = s; renderStatic(s); }, (e) => console.error(e));
-    setInterval(tick, 1500);
-    pingTick(); setInterval(pingTick, 10000);
-    renderBluetooth(); setInterval(renderBluetooth, 20000);
+    whileVisible(1500, tick);
+    // The ping and the Bluetooth card are only on this page.
+    const onPage = (fn) => () => { if (current === 'overview') fn(); };
+    pingTick(); whileVisible(10000, onPage(pingTick));
+    renderBluetooth(); whileVisible(20000, onPage(renderBluetooth));
   }
-  return { start };
+  return { start, enter() { pingTick(); renderBluetooth(); } };
 })();
 
 // ---------- Disk space ----------
@@ -303,7 +346,7 @@ views.storage = (() => {
       const p = (d.used / d.size) * 100;
       return `<div class="drive-card">
         <div class="row-between"><strong>${fmt.esc(d.mount)}</strong><span>${Math.round(p)}% full</span></div>
-        <div class="meter ${meterClass(p)}"><i style="width:${p}%"></i></div>
+        <div class="meter ${meterClass(p)}"><i style="${fill(p)}"></i></div>
         <small>${fmt.bytes(d.free)} free of ${fmt.bytes(d.size)}</small>
         <button class="btn small" data-scan="${fmt.esc(d.mount)}\\">Scan ${fmt.esc(d.mount)}</button>
       </div>`;
@@ -354,7 +397,7 @@ views.storage = (() => {
 
   function setTab(t) {
     tab = t;
-    $$('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
+    $$('.tabs button').forEach((b) => { b.classList.toggle('active', b.dataset.tab === t); b.setAttribute('aria-selected', b.dataset.tab === t); });
     $$('.tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === t));
     if (t === 'largest') renderLargest();
     if (t === 'types') renderTypes();
@@ -373,7 +416,7 @@ views.storage = (() => {
   }
 
   function renderCrumbs(data) {
-    $('#crumbs').innerHTML = data.crumbs.map((x, i) => `${i ? '<span class="sep">›</span>' : ''}<button data-p="${fmt.esc(x.path)}">${fmt.esc(x.name)}</button>`).join('');
+    $('#crumbs').innerHTML = data.crumbs.map((x, i) => `${i ? '<span class="sep">›</span>' : ''}<button data-p="${fmt.esc(x.path)}" title="${fmt.esc(x.path)}">${fmt.esc(x.name)}</button>`).join('');
     $$('#crumbs button').forEach((b) => b.addEventListener('click', () => open(b.dataset.p)));
     $('#ex-up').disabled = !data.parent;
   }
@@ -478,7 +521,8 @@ views.storage = (() => {
 
   async function renderLargest() {
     const rows = (await attempt(() => hw.scanLargest())) || [];
-    $('#largest').innerHTML = `<div class="ft-row head-row" style="grid-template-columns:minmax(0,1fr) 120px 80px"><span>The ${rows.length} biggest files in ${fmt.esc(state.scan.root)}</span><span class="num" style="font:inherit">Size</span><span></span></div>` +
+    if (!rows.length) { $('#largest').innerHTML = '<div class="ft-empty">No files were found in this scan.</div>'; return; }
+    $('#largest').innerHTML =`<div class="ft-row head-row" style="grid-template-columns:minmax(0,1fr) 120px 80px"><span>The ${rows.length} biggest files in ${fmt.esc(state.scan.root)}</span><span class="num" style="font:inherit">Size</span><span></span></div>` +
       rows.map((f) => `<div class="ft-row"><div class="path"><b><span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:8px;background:${colorOf(f)}"></span>${fmt.esc(f.name)}</b><small>${fmt.esc(f.path)}</small></div>
           <span class="num">${fmt.bytes(f.size)}</span>
           <span class="acts"><button class="icon-btn" data-reveal="${fmt.esc(f.path)}" title="Show in Explorer" aria-label="Show in Explorer">${ICON.reveal}</button>
@@ -487,6 +531,7 @@ views.storage = (() => {
 
   async function renderTypes() {
     const rows = (await attempt(() => hw.scanTypes())) || [];
+    if (!rows.length) { $('#types').innerHTML = '<div class="ft-empty">No files were found in this scan.</div>'; return; }
     const max = rows[0] ? rows[0].size : 1;
     $('#types').innerHTML = `<div class="ft-row types-row head-row"><span>Type</span><span>Share of scanned space</span><span class="num" style="font:inherit">Size</span><span class="num" style="font:inherit">Files</span></div>` +
       rows.map((t) => {
@@ -713,7 +758,7 @@ views.network = (() => {
   hw.onSpeedProgress((p) => {
     const label = { ping: 'Measuring response time', download: 'Download', upload: 'Upload' }[p.phase];
     $('#sg-label').textContent = label;
-    $('#sg-bar').style.width = `${(p.progress || 0) * 100}%`;
+    $('#sg-bar').style.cssText = fill((p.progress || 0) * 100);
     if (p.phase === 'ping' && p.ping != null) { $('#sr-ping').textContent = `${Math.round(p.ping)} ms`; $('#sr-jitter').textContent = `${p.jitter.toFixed(1)} ms`; }
     if (p.bps != null) { $('#sg-value').textContent = fmt.bps(p.bps); $('#sg-value').classList.remove('idle'); }
   });
@@ -729,7 +774,7 @@ views.network = (() => {
     const x = await attempt(() => hw.speedTest());
     running = false;
     b.disabled = false; b.textContent = 'Test again';
-    $('#sg-bar').style.width = '0';
+    $('#sg-bar').style.cssText = fill(0);
     $('#sg-label').textContent = 'Download';
     if (!x) return;
     $('#sg-value').textContent = fmt.bps(x.download);
@@ -767,7 +812,13 @@ views.health = (() => {
       <b>${fmt.esc(f.label)}</b><p>${fmt.esc(f.detail)}</p>${f.fix ? `<p class="fix">${fmt.esc(f.fix)}</p>` : ''}${f.action ? actionButton(f.action) : ''}</div></div>`;
   }
 
+  // Details that were already showing are redrawn as they are; only newly opened ones fade in.
+  let shown = new Set();
   function render() {
+    const isOpen = (id) => open.has(id) && results[id] && !running.has(id);
+    const nowShown = new Set(parts.map((p) => p.id).filter(isOpen));
+    const reveal = new Set([...nowShown].filter((id) => !shown.has(id)));
+    shown = nowShown;
     $('#hc-list').innerHTML = parts.map((p) => {
       const r = results[p.id];
       const isRun = running.has(p.id), isQ = queued.has(p.id);
@@ -778,18 +829,18 @@ views.health = (() => {
       const desc = r && !isRun
         ? `${r.status === 'error' ? 'The check could not finish. ' : flagged ? `${flagged} of ${r.items.length} findings need a look. ` : r.status === 'good' ? `All ${r.items.length} checks passed. ` : ''}Checked ${fmt.ago(r.at)}.`
         : p.desc;
-      const expanded = open.has(p.id) && r && !isRun;
+      const expanded = nowShown.has(p.id);
       return `<div class="hc-item">
         <div class="hc-row">
           <span class="hc-icon">${ICON[p.id]}</span>
           <div><h3>${fmt.esc(p.name)}</h3><p>${fmt.esc(desc)}</p></div>
           ${chip}
-          <div style="display:flex;gap:6px">
+          <div class="hc-actions">
             ${r && !isRun ? `<button class="btn ghost small" data-toggle="${p.id}" aria-expanded="${expanded}">${expanded ? 'Hide details' : 'Show details'}</button>` : ''}
             <button class="btn small" data-run="${p.id}" ${isRun || isQ ? 'disabled' : ''}>${r ? 'Check again' : 'Check'}</button>
           </div>
         </div>
-        ${expanded ? `<div class="hc-results">${r.items.map(finding).join('')}<div class="hc-meta">Took ${(r.ms / 1000).toFixed(1)} seconds.</div></div>` : ''}
+        ${expanded ? `<div class="hc-results${reveal.has(p.id) ? ' enter' : ''}">${r.items.map(finding).join('')}<div class="hc-meta">Took ${(r.ms / 1000).toFixed(1)} seconds.</div></div>` : ''}
       </div>`;
     }).join('');
     renderSummary();
@@ -871,7 +922,7 @@ views.health = (() => {
 
 // ---------- Bluetooth ----------
 views.bluetooth = (() => {
-  let timer = null;
+  let stop = null;
   const KIND = { audio: 'Headphones or speaker', keyboard: 'Keyboard', mouse: 'Mouse', controller: 'Game controller', phone: 'Phone', wearable: 'Watch or wearable', other: 'Bluetooth device' };
 
   function card(d) {
@@ -914,8 +965,8 @@ views.bluetooth = (() => {
   }
 
   return {
-    enter() { refresh(); timer = setInterval(refresh, 10000); },
-    leave() { clearInterval(timer); timer = null; },
+    enter() { refresh(); stop = whileVisible(10000, refresh); },
+    leave() { stop(); stop = null; },
   };
 })();
 
