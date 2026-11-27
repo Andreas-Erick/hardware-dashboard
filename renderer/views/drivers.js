@@ -27,7 +27,7 @@ views.drivers = (() => {
     all = r.drivers;
     const vendor = all.filter((d) => !R.isMicrosoftDriver(d));
     const old = all.filter((d) => R.isOldDriver(d));
-    $('#dr-sub').textContent = `${all.length} drivers installed, ${vendor.length} of them from hardware makers. ${old.length ? `${old.length} are more than three years old.` : 'None of the hardware makers’ drivers are more than three years old.'}`;
+    $('#dr-sub').textContent = `${all.length} drivers installed, ${vendor.length} of them from hardware makers. ${old.length ? `${old.length} ${old.length === 1 ? 'is' : 'are'} more than three years old.` : 'None of the hardware makers’ drivers are more than three years old.'}`;
 
     let html = '';
     if (r.problems.length) {
