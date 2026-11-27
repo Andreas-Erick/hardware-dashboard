@@ -13,7 +13,9 @@ try {
   $t.Wait(5000) | Out-Null
   $bt = $t.Result | Where-Object { $_.Kind -eq 'Bluetooth' } | Select-Object -First 1
   if ($bt) { $radio = [string]$bt.State }
-} catch {}
+} catch {
+  # The WinRT Radios API is missing on some Windows builds. $radio stays $null, which the page shows as unknown.
+}
 
 $adapters = Get-PnpDevice -Class Bluetooth | Where-Object { $_.InstanceId -match '^(USB|PCI)\\' } | ForEach-Object {
   $drv = Get-CimInstance Win32_PnPSignedDriver -Filter ("DeviceID='" + ($_.InstanceId -replace '\\', '\\') + "'")

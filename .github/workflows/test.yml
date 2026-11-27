@@ -5,10 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     # The app and its tests are Windows-only: paths, junctions and PowerShell output.
     runs-on: windows-latest
+    timeout-minutes: 10
     env:
       # The tests never start Electron, so skip its ~100 MB download.
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
@@ -19,4 +27,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Every main-process and page script must at least parse.
+      - name: Syntax check
+        shell: bash
+        run: for f in *.js src/**/*.js src/*.js shared/*.js renderer/*.js renderer/views/*.js scripts/*.js; do node --check "$f"; done
       - run: npm test

@@ -1,0 +1,9 @@
+# Store text with LF in the repository; Windows scripts keep CRLF on checkout.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.ico binary
+*.png binary
+
+package-lock.json linguist-generated=true

@@ -2,15 +2,24 @@
   "name": "hardware-dashboard",
   "productName": "Hardware Dashboard",
   "version": "1.0.0",
-  "description": "A friendly dashboard for watching your PC's hardware and finding where disk space went.",
+  "private": true,
+  "description": "A Windows desktop app that shows live hardware readings, checks each part of the PC for problems, and finds where your disk space went.",
+  "author": "Andreas-Erick",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Andreas-Erick/hardware-dashboard.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "main": "main.js",
+  "type": "commonjs",
   "scripts": {
     "start": "electron .",
     "test": "node --test test/*.test.js",
     "check": "node scripts/smoke-test.js"
   },
-  "license": "MIT",
-  "type": "commonjs",
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
     "@fontsource/atkinson-hyperlegible": "^5.3.0",
