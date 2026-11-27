@@ -21,3 +21,4 @@ The words the code and the interface share. When the UI and the code name the sa
 | **Wi-Fi quality** | Signal strength, 0–100%. Shown as "Signal". | `quality` |
 | **Rate / bps** | Live network traffic is in bytes per second; speed test results are in bits per second. | `fmt.rate`, `fmt.bps` |
 | **Internet** | The page and health check about connectivity. | `network` |
+| **Demo mode** | The app running on a made-up PC (`HD_DEMO=1`, `npm run demo`), for screenshots and trying it out. Only the data sources are replaced. | `src/demo.js` |

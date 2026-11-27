@@ -17,6 +17,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "electron .",
+    "demo": "set HD_DEMO=1&& electron .",
     "test": "node --test test/*.test.js",
     "check": "node scripts/smoke-test.js"
   },

@@ -13,6 +13,10 @@ on your PC: no account and no telemetry. The only network traffic is a
 small ping to 1.1.1.1 and 8.8.8.8 for response time, and the speed test
 you start yourself.
 
+![Overview page: live processor, memory and graphics load, temperatures, drives, internet and Bluetooth](docs/screenshots/overview.png)
+
+<sub>Screenshots use the built-in demo mode, so every value is made up.</sub>
+
 ## Start it
 
 On a new machine, double-click **`Start Hardware Dashboard.cmd`** once.
@@ -24,6 +28,7 @@ From a terminal (Node.js 20 or newer):
 ```powershell
 npm install
 npm start        # open the app
+npm run demo     # open it on a made-up PC
 npm test         # behaviour tests, no Windows tools needed
 npm run check    # smoke-test the data layer on this PC
 ```
@@ -43,6 +48,24 @@ The logo is `renderer/logo.svg`. Rebuild the icon with
 
 </details>
 
+<details>
+<summary>Demo mode and screenshots</summary>
+
+`npm run demo` (or `HD_DEMO=1`) runs the app on an invented PC from
+`src/demo.js`. Only the data sources are replaced: the health rules, the
+disk scan engine and the interface run unchanged. It uses its own
+profile, so none of your history shows up.
+
+To refresh the screenshots, set `HD_CAPTURE` to a folder. The app opens
+every page, saves a screenshot of each, then quits:
+
+```powershell
+$env:HD_DEMO = 1; $env:HD_CAPTURE = "$PWD\shots"
+npx electron .
+```
+
+</details>
+
 ## What it shows
 
 | Page | What you get |
@@ -54,6 +77,37 @@ The logo is `renderer/logo.svg`. Rebuild the icon with
 | **Internet** | Online status, Wi-Fi network and signal, addresses, router, DNS, adapters, and a speed test (download, upload, ping, jitter) with history. |
 | **Bluetooth** | Adapter, radio, driver, the Bluetooth service, and paired devices with connection state and battery level. |
 | **Health check** | One check per part. Each finding says what was found and what to do, with a button to the right Windows tool. |
+
+<details>
+<summary>Screenshots of every page</summary>
+
+**Health check**
+
+![Health check: processor findings expanded, other parts healthy](docs/screenshots/health-check.png)
+
+**Disk space**
+
+![Disk space: a drive shown as a map, tile size is disk space](docs/screenshots/disk-space.png)
+
+![Disk space: the largest files on the drive](docs/screenshots/largest-files.png)
+
+**Clean up**
+
+![Clean up: caches with their size and a button to clear each](docs/screenshots/clean-up.png)
+
+**Drivers**
+
+![Drivers: key drivers with their age and the full driver list](docs/screenshots/drivers.png)
+
+**Internet**
+
+![Internet: speed test result, connection details and adapters](docs/screenshots/internet.png)
+
+**Bluetooth**
+
+![Bluetooth: adapter status and paired devices with battery levels](docs/screenshots/bluetooth.png)
+
+</details>
 
 <details>
 <summary>What the health checks look at</summary>
@@ -180,6 +234,8 @@ src/
   net-probe.js     TCP ping and latency statistics
   bluetooth.js     Adapter, radio, paired devices (+ .ps1)
   cleanup.js       Each item measures and clears itself
+  demo.js          Made-up PC for demo mode (HD_DEMO=1)
+  mem-fs.js        In-memory filesystem (tests, demo)
   fs-walk.js       Folder walk for the scan and Clean up
   scan/            index.js (module), tree.js (pure),
                    engine.js, worker / in-process adapters,
@@ -193,6 +249,7 @@ renderer/
 test/              npm test: in-memory fs, recorded output
 scripts/           smoke test, icon, shortcuts
 docs/adr/          Architecture decision records
+docs/screenshots/  README images, taken in demo mode
 ```
 
 The words the code and the interface use are in

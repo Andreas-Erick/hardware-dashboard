@@ -16,6 +16,10 @@ const { createTrashGuard, windowsProtection } = require('./src/scan/trash-guard'
 const { shell: winShell } = require('./src/shell');
 const { registerApi } = require('./src/ipc');
 
+// HD_DEMO=1 runs on a made-up PC (src/demo.js), with its own profile so no real history shows up.
+const demo = process.env.HD_DEMO ? require('./src/demo').createDemo() : null;
+if (demo) app.setPath('userData', path.join(app.getPath('temp'), 'hardware-dashboard-demo'));
+
 app.setAppUserModelId('com.hardwaredashboard.app');
 // One window only: launching the shortcut again brings the open window forward.
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -47,11 +51,12 @@ function createWindow() {
   win.webContents.on('will-navigate', (e) => e.preventDefault());
 }
 
-const health = createHealth();
+const health = createHealth(demo ? { probes: demo.probes } : {});
 const scan = createDiskScan({
   blockReason: createTrashGuard(windowsProtection({ home: app.getPath('home'), appData: app.getPath('appData') })),
   trashItem: (p) => shell.trashItem(p),
   getDrives: () => monitor.drives(),
+  ...(demo ? demo.scan : {}),
 });
 
 const LINKS = {
@@ -74,78 +79,85 @@ const TOOLS = {
 };
 
 // ---- Everything the window can ask for (window.hw.<name>) and every event it can listen to ----
+const methods = {
+  staticInfo: () => monitor.getStatic(),
+  live: () => monitor.getLive(),
+  drives: () => monitor.drives(),
+  drivers: () => drivers.list(),
+  netInfo: () => network.info(),
+  netStatus: () => network.status(),
+  speedTest: () => network.speedTest((p) => emit('speedProgress', p)),
+  bluetooth: (force) => bluetooth.info(Boolean(force)),
+
+  // The battery check is only offered on PCs that have one.
+  healthChecks: async () => {
+    const { hasBattery } = await methods.staticInfo();
+    return health.checks.filter((c) => c.id !== 'battery' || hasBattery);
+  },
+  healthRun: (id) => health.runCheck(id),
+  async batteryReport() {
+    const out = path.join(app.getPath('temp'), 'hardware-dashboard-battery-report.html');
+    await winShell.run('powercfg', ['/batteryreport', '/output', out], 30000);
+    if (!fs.existsSync(out)) throw new Error("Windows couldn't create the battery report.");
+    const err = await shell.openPath(out);
+    if (err) throw new Error(`The battery report was saved but couldn't be opened: ${err}`);
+  },
+
+  scanStart: (root) => scan.start(root, {
+    onProgress: (s) => emit('scanProgress', s),
+    onDone: (s) => emit('scanDone', s),
+  }),
+  scanCancel: () => scan.cancel(),
+  scanChildren: (p) => scan.children(p),
+  scanLargest: () => scan.largest(),
+  scanTypes: () => scan.types(),
+  async pickFolder() {
+    const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: 'Choose a folder to scan' });
+    return r.canceled ? null : r.filePaths[0];
+  },
+  reveal(p) {
+    if (!scan.contains(p)) throw new Error('Only items found by the current scan can be shown from here.');
+    shell.showItemInFolder(path.resolve(p));
+  },
+  trash: (p) => scan.trash(p),
+
+  cleanupList: () => cleanup.listAll((item) => emit('cleanupItem', item)),
+  cleanupClear: (id) => cleanup.clear(id),
+
+  openLink(key) {
+    if (!LINKS[key]) throw new Error(`Unknown link "${key}".`);
+    return shell.openExternal(LINKS[key]);
+  },
+  openTool(key) {
+    const t = TOOLS[key];
+    if (!t) throw new Error(`Unknown tool "${key}".`);
+    spawn(t[0], t[1], { detached: true, stdio: 'ignore' }).unref();
+  },
+  async isAdmin() {
+    const r = await winShell.ps('([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)', 8000);
+    return r.ok && r.stdout.trim() === 'True';
+  },
+  /** Resolves false when the user declined the Windows prompt; the app quits when it worked. */
+  async relaunchAdmin() {
+    const exe = process.execPath.replace(/'/g, "''");
+    const appDir = app.getAppPath().replace(/'/g, "''");
+    const args = app.isPackaged ? '' : ` -ArgumentList '"${appDir}"'`;
+    const r = await winShell.ps(`try { Start-Process -FilePath '${exe}'${args} -Verb RunAs -ErrorAction Stop; 'ok' } catch { 'no' }`, 60000);
+    const ok = r.ok && r.stdout.trim() === 'ok';
+    if (ok) app.quit();
+    return ok;
+  },
+};
+if (demo) {
+  Object.assign(methods, demo.methods, {
+    speedTest: () => demo.speedTest((p) => emit('speedProgress', p)),
+    cleanupList: () => demo.methods.cleanupList((item) => emit('cleanupItem', item)),
+  });
+}
 const emit = registerApi(ipcMain, {
   getTarget: () => win && win.webContents,
   events: ['speedProgress', 'scanProgress', 'scanDone', 'cleanupItem'],
-  methods: {
-    staticInfo: () => monitor.getStatic(),
-    live: () => monitor.getLive(),
-    drives: () => monitor.drives(),
-    drivers: () => drivers.list(),
-    netInfo: () => network.info(),
-    netStatus: () => network.status(),
-    speedTest: () => network.speedTest((p) => emit('speedProgress', p)),
-    bluetooth: (force) => bluetooth.info(Boolean(force)),
-
-    // The battery check is only offered on PCs that have one.
-    healthChecks: async () => {
-      const { hasBattery } = await monitor.getStatic();
-      return health.checks.filter((c) => c.id !== 'battery' || hasBattery);
-    },
-    healthRun: (id) => health.runCheck(id),
-    async batteryReport() {
-      const out = path.join(app.getPath('temp'), 'hardware-dashboard-battery-report.html');
-      await winShell.run('powercfg', ['/batteryreport', '/output', out], 30000);
-      if (!fs.existsSync(out)) throw new Error("Windows couldn't create the battery report.");
-      const err = await shell.openPath(out);
-      if (err) throw new Error(`The battery report was saved but couldn't be opened: ${err}`);
-    },
-
-    scanStart: (root) => scan.start(root, {
-      onProgress: (s) => emit('scanProgress', s),
-      onDone: (s) => emit('scanDone', s),
-    }),
-    scanCancel: () => scan.cancel(),
-    scanChildren: (p) => scan.children(p),
-    scanLargest: () => scan.largest(),
-    scanTypes: () => scan.types(),
-    async pickFolder() {
-      const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: 'Choose a folder to scan' });
-      return r.canceled ? null : r.filePaths[0];
-    },
-    reveal(p) {
-      if (!scan.contains(p)) throw new Error('Only items found by the current scan can be shown from here.');
-      shell.showItemInFolder(path.resolve(p));
-    },
-    trash: (p) => scan.trash(p),
-
-    cleanupList: () => cleanup.listAll((item) => emit('cleanupItem', item)),
-    cleanupClear: (id) => cleanup.clear(id),
-
-    openLink(key) {
-      if (!LINKS[key]) throw new Error(`Unknown link "${key}".`);
-      return shell.openExternal(LINKS[key]);
-    },
-    openTool(key) {
-      const t = TOOLS[key];
-      if (!t) throw new Error(`Unknown tool "${key}".`);
-      spawn(t[0], t[1], { detached: true, stdio: 'ignore' }).unref();
-    },
-    async isAdmin() {
-      const r = await winShell.ps('([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)', 8000);
-      return r.ok && r.stdout.trim() === 'True';
-    },
-    /** Resolves false when the user declined the Windows prompt; the app quits when it worked. */
-    async relaunchAdmin() {
-      const exe = process.execPath.replace(/'/g, "''");
-      const appDir = app.getAppPath().replace(/'/g, "''");
-      const args = app.isPackaged ? '' : ` -ArgumentList '"${appDir}"'`;
-      const r = await winShell.ps(`try { Start-Process -FilePath '${exe}'${args} -Verb RunAs -ErrorAction Stop; 'ok' } catch { 'no' }`, 60000);
-      const ok = r.ok && r.stdout.trim() === 'ok';
-      if (ok) app.quit();
-      return ok;
-    },
-  },
+  methods,
 });
 
 // Development aid: HD_CAPTURE=<folder> saves a screenshot of every page, then quits.
@@ -167,7 +179,7 @@ async function captureAll(dir) {
   };
   await wait(5000);
   await shot('overview');
-  const scanRoot = process.env.HD_CAPTURE_SCAN || app.getPath('documents');
+  const scanRoot = process.env.HD_CAPTURE_SCAN || (demo ? demo.scanRoot : app.getPath('documents'));
   await js(`hd.scan(${JSON.stringify(scanRoot)})`);
   await wait(2000);
   for (let i = 0; i < 600 && (await js('hd.scanRunning()')); i++) await wait(1000);
@@ -180,6 +192,8 @@ async function captureAll(dir) {
   for (const v of ['bluetooth', 'cleanup', 'drivers', 'network']) {
     await js(`hd.show('${v}')`);
     await wait(v === 'drivers' ? 10000 : 6000);
+    // The demo's speed test is simulated and quick, so its screenshot can show a result.
+    if (demo && v === 'network') { await js("document.querySelector('#speed-start').click()"); await wait(9000); }
     await shot(v);
   }
   await js("hd.show('health'); hd.checkHealth()");
